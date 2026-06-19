@@ -1,0 +1,14 @@
+[package]
+name        = "solver-backtest"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+
+[dependencies]
+solver-types     = { workspace = true }
+solver-router    = { workspace = true }
+solver-pricing   = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+anyhow           = { workspace = true }
+chrono           = { workspace = true }

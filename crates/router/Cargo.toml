@@ -1,0 +1,11 @@
+[package]
+name        = "solver-router"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+
+[dependencies]
+solver-types     = { workspace = true }
+solver-pricing   = { workspace = true }
+serde            = { workspace = true }
+anyhow           = { workspace = true }
