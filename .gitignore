@@ -1,0 +1,24 @@
+# --- Secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+
+# --- Rust build ---
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# --- Generated data & reports (regenerate via `just`, do not version) ---
+/data
+/reports
+
+# --- Session/agent scratch (canon docs live in repo root, NOT here) ---
+# Keep .claude/ for local agent config & TEMPORARY runbooks only — never cite
+# from code as canon, never let it become a second source of truth.
+.claude/settings.local.json
+
+# --- OS / editor ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
