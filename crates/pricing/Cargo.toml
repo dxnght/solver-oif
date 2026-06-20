@@ -6,5 +6,10 @@ license     = { workspace = true }
 
 [dependencies]
 solver-types     = { workspace = true }
-serde            = { workspace = true }
-anyhow           = { workspace = true }
+alloy-primitives = { workspace = true }
+async-trait      = { workspace = true }
+thiserror        = { workspace = true }
+reqwest          = { workspace = true }
+
+[dev-dependencies]
+tokio            = { workspace = true }
