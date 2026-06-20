@@ -20,14 +20,24 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
 — лише KYC, але новачок заробляє копійки; головні маршрути — маржа 2–8 bps, з'їдена
 об'ємом. Висновок: цінність — **демонстрація дисципліни + грантовий артефакт**, не дохід.
 
-## Що працює (перевірено читанням попередньої реалізації)
-- **Єдиний `FillPolicy`** — «fill» означає одне в live і backtest.
-- **would_fill-калібрування** — `precision` + margin-drift проти realized (машинерія є;
-  наповнити даними).
-- **Verify-links** — `TxRef` → block-explorer; лише верифіковані домени, `None` для
-  невідомих. Зразок чесної роботи.
-- **Heartbeat/legibility** — live чесно каже «no real-time open source… idle».
-- **Across scan-loop** — інженерно міцний.
+## Що працює (B0 verified core — реалізовано й перевірено наскрізно)
+Чистий рестарт пройшов наскрізний no-key цикл `ingest uniswapx → backtest → звіт`:
+- **6-крейтова основа зелена**: `build + clippy -D warnings + test` (44 тести,
+  поведінкові/property, не тавтологічні). Компілятор — істина.
+- **RouterV0** — `NormalizedIntent → Quote/Skip`: економіка філлера в USD,
+  asset-class confidence, Dutch-decay, `QuoteOutcome`/`SkipReason`.
+- **Єдиний `FillPolicy`** — «fill» означає одне в live і backtest (один код-шлях).
+- **would_fill-калібрування — наповнене реальними даними**: на ~1090 живих UniswapX-
+  інтентах would_fill_precision ≈ **43%** (модель оптимістична проти realized).
+- **Verify-links** — `TxRef` → block-explorer; лише верифіковані домени, `None`/`—` для
+  невідомих. У звіті кожен fill несе клікабельний tx-лінк.
+- **`solver doctor`** — read-only preflight без мережі: каже, що дасть дані до прогону.
+
+**Емпіричний урок (записано в spec §0):** на static-цінах would_fill на **волатильних**
+маршрутах давав фантомний edge ($1.18M «прибутку», 94% «precision») — артефакт
+static-ціни (та ще й тавтологічної: модель і realized-звірка ділять ту саму хибну ціну).
+Прибрано: крос-клас confidence опущено нижче порога fill → would_fill лише на same-class,
+де $1-peg реальний. Результат тверезий (precision ≈43%), що й підтверджує edge≈0.
 
 ## Що під підозрою / зламано (з аудиту)
 - 🔴 **OIF InputSettler-адреса хардкоднута й НЕВЕРИФІКОВАНА** (`live/oif/deployments.rs`):
@@ -40,10 +50,13 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
 - **Компіляція не підтверджена незалежним аудитом** (потрібні build/test-логи).
 
 ## Найближче (порядок із ROADMAP)
-1. **B0 — verified core**: `doctor` + no-key цикл із verify-links + зелений CI.
-2. **B1** — наповнити would_fill-калібрування даними.
-3. **B2** — поточні Across-події (ловити реальний потік).
-4. **B3** — live gas/prices + калібрування clearing_delay.
+1. ✅ **B0 — verified core**: `doctor` + no-key цикл із verify-links + зелений CI — **зроблено**.
+2. **B1 (наступне)** — поглибити would_fill-калібрування: margin-drift, розбивка по
+   маршрутах, dest_summary. (Машинерія є; precision-число вже реальне.)
+3. **B2** — поточні Across-події + Etherscan-V2 проба в `doctor` (відкладена з B0:
+   немає Across-шляху, що споживає V2 block-times — не будувати передчасну ширину).
+4. **B3** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз навмисно
+   нижче порога на static-цінах).
 5. Тільки тоді — нова ширина (FEED/PATH/OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
