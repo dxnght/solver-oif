@@ -94,8 +94,14 @@ impl UniswapXIngest {
     async fn scan_chain(&self, chain: ChainId, since: DateTime<Utc>) -> Result<usize> {
         let out_path = self.cfg.out_dir
             .join(format!("uniswapx-{}-{}.jsonl", chain.name(), Utc::now().format("%Y%m%d")));
-        let mut sink = JsonlSink::open(&out_path).await?;
 
+        // Open the sink lazily — only on the first in-window order. Most chains
+        // have little or no recent UniswapX flow (optimism/polygon are dead,
+        // arbitrum/unichain are sparse); eagerly creating the file left a
+        // confusing 0-byte artifact that looks like a failure. With no orders
+        // we now write no file; the `written=0` log line is the record that we
+        // checked and found nothing (legibility, CLAUDE.md rule #7).
+        let mut sink: Option<JsonlSink> = None;
         let mut cursor: Option<String> = None;
         let mut written = 0usize;
         let since_unix = since.timestamp() as u64;
@@ -108,7 +114,13 @@ impl UniswapXIngest {
                 let ts = order.created_at_unix();
                 if ts < since_unix { continue; }
                 match Self::normalize(chain, order) {
-                    Ok(intent) => { sink.write(&intent).await?; written += 1; }
+                    Ok(intent) => {
+                        if sink.is_none() {
+                            sink = Some(JsonlSink::open(&out_path).await?);
+                        }
+                        sink.as_mut().unwrap().write(&intent).await?;
+                        written += 1;
+                    }
                     Err(e) => debug!(error = %e, "skipping uniswapx order"),
                 }
             }
@@ -117,7 +129,10 @@ impl UniswapXIngest {
             if cursor.is_none() { break; }
         }
 
-        sink.flush().await?;
+        match sink {
+            Some(mut s) => s.flush().await?,
+            None => info!(chain = %chain, "no in-window orders — no file written"),
+        }
         info!(chain = %chain, written, "uniswapx chain done");
         Ok(written)
     }
