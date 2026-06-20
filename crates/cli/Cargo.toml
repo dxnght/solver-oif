@@ -1,0 +1,21 @@
+[package]
+name        = "solver-cli"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+
+[[bin]]
+name = "solver"
+path = "src/main.rs"
+
+[dependencies]
+solver-types     = { workspace = true }
+solver-ingest    = { workspace = true }
+solver-pricing   = { workspace = true }
+solver-router    = { workspace = true }
+solver-backtest  = { workspace = true }
+anyhow           = { workspace = true }
+clap             = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
