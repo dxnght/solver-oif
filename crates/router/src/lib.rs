@@ -34,13 +34,20 @@ use solver_types::{
     RouteHop, RouteSource, SignedAmount, TokenRef,
 };
 
-/// Confidence in a same-class route (stable→stable): identity sourcing is
-/// accurate, so the modeled profit is trustworthy modulo static prices.
+/// Confidence in a same-class route (stable→stable): both legs are valued at
+/// the genuinely-accurate $1 peg and identity sourcing is at par, so the
+/// modeled profit is trustworthy. Above the default fill threshold.
 pub const CONF_SAME_CLASS: f64 = 0.90;
-/// Confidence in a cross-class route (e.g. ETH→USDC): the offline pricer does
-/// not model the DEX slippage the filler would actually pay, so the modeled
-/// profit is optimistic — we say so with a lower number rather than hide it.
-pub const CONF_CROSS_CLASS: f64 = 0.55;
+/// Confidence in a cross-class route (e.g. ETH/BTC→USDC) **on static prices**:
+/// deliberately set BELOW the default `FillPolicy.min_confidence` (0.50) so
+/// these never count as would_fill. Two errors make static cross-class profit
+/// untrustworthy: (1) the static ETH/BTC price rarely matches the order's
+/// epoch price — a 2x-off BTC price fabricates a ~100% phantom margin; (2) DEX
+/// slippage on the real swap is unmodeled. We quote them (measuring economics
+/// is the router's job) but refuse to call them fillable until a live feed
+/// lands (bucket B3 revisits this number, feed-aware). This is the explicit
+/// removal of false confidence (CORE-5), not a tuned threshold-dodge.
+pub const CONF_CROSS_CLASS: f64 = 0.40;
 
 /// Why the Router declined to quote an intent. Serialized into the
 /// decisions JSONL `reason` field downstream — **do not rename** the strings.
@@ -315,15 +322,22 @@ mod tests {
         assert!(!FillPolicy::default().is_fill(&q));
     }
 
-    /// Cross-class (WETH→USDC) is priced but flagged less confident than a
-    /// same-class route — the honest signal that slippage is unmodeled.
+    /// Cross-class (WETH→USDC) is priced but, on static prices, must sit below
+    /// the default fill threshold and therefore NEVER count as would_fill —
+    /// even when the modeled profit looks large. This is the guard against the
+    /// static-price phantom-margin artifact (CORE-5: no false confidence).
     #[tokio::test]
-    async fn cross_class_is_lower_confidence() {
-        // 1 WETH in (~$3000), 2990 USDC out → small positive modeled profit.
-        let i = intent(ChainId::BASE, ChainId::BASE, BASE_WETH, 1_000_000_000_000_000_000, 18, BASE_USDC, 2_990_000_000, 6);
+    async fn cross_class_quotes_but_never_fills_on_static_prices() {
+        // 1 WETH in (~$3000) vs only 1500 USDC out → a fat *phantom* $1500
+        // modeled profit. The policy must still decline it (Suspect), because
+        // confidence is below threshold.
+        let i = intent(ChainId::BASE, ChainId::BASE, BASE_WETH, 1_000_000_000_000_000_000, 18, BASE_USDC, 1_500_000_000, 6);
         let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
         assert_eq!(q.confidence, CONF_CROSS_CLASS);
         assert!(q.confidence < CONF_SAME_CLASS);
+        assert!(q.expected_profit_usd > 1000.0, "phantom profit is large: {}", q.expected_profit_usd);
+        assert!(!FillPolicy::default().is_fill(&q), "static cross-class must not fill");
+        assert!(q.confidence < FillPolicy::default().min_confidence);
     }
 
     /// An unrecognised output token has no offline USD price → skip rather
