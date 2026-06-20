@@ -11,4 +11,4 @@
 
 pub mod client;
 
-pub use client::{UniswapXIngest, UniswapXIngestConfig};
+pub use client::{UniswapXIngest, UniswapXIngestConfig, UNISWAPX_CHAINS};

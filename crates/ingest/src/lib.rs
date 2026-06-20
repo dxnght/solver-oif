@@ -15,4 +15,4 @@ pub mod store;
 pub mod uniswapx;
 
 pub use store::JsonlSink;
-pub use uniswapx::{UniswapXIngest, UniswapXIngestConfig};
+pub use uniswapx::{UniswapXIngest, UniswapXIngestConfig, UNISWAPX_CHAINS};
