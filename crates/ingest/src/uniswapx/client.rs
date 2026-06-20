@@ -183,10 +183,8 @@ impl UniswapXIngest {
 
         let observed = DateTime::<Utc>::from_timestamp(order.created_at_unix() as i64, 0)
             .unwrap_or_else(Utc::now);
-        let deadline = DateTime::<Utc>::from_timestamp(order.deadline.unwrap_or(0) as i64, 0)
-            .unwrap_or(observed + Duration::minutes(5));
 
-        // Dutch V3: decay times live in cosignerData when absent at top level (RUN-7).
+        // Dutch V2/V3: decay times live in cosignerData when absent at top level (RUN-7).
         let (decay_start, decay_end) = match (order.decay_start_time, order.decay_end_time) {
             (Some(s), Some(e)) => (Some(s), Some(e)),
             _ => order
@@ -195,6 +193,20 @@ impl UniswapXIngest {
                 .map(|cd| (cd.decay_start_time, cd.decay_end_time))
                 .unwrap_or((None, None)),
         };
+
+        // The `/orders` REST payload omits a top-level `deadline` for Dutch
+        // orders (it is null in practice); the auction's `decayEndTime`
+        // (top-level or cosigner) is the order's effective end and the right
+        // proxy. Fall back to decayStartTime, then observed+5m — so an intent
+        // always carries a sane future deadline instead of collapsing to epoch
+        // 0, which made every order look expired downstream (CORE-6).
+        let deadline = order
+            .deadline
+            .filter(|&d| d > 0)
+            .or(decay_end)
+            .or(decay_start)
+            .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0))
+            .unwrap_or(observed + Duration::minutes(5));
 
         let decay = match (decay_start, decay_end) {
             (Some(s), Some(e)) => Some(DutchDecay {
@@ -520,6 +532,29 @@ mod tests {
         )
         .unwrap();
         assert!(UniswapXIngest::normalize(ChainId::BASE, &page.orders[0]).is_err());
+    }
+
+    #[test]
+    fn deadline_falls_back_to_decay_end_when_api_omits_it() {
+        // Real `/orders` Dutch_V2 shape: no top-level `deadline`, decay times
+        // only in cosignerData. The intent's deadline must come from
+        // `decayEndTime` and sit AFTER `observed_at` — otherwise every order
+        // looks expired (the CORE-6 bug). Timestamps mirror live data.
+        let page: OrdersPage = serde_json::from_str(
+            r#"{ "orders": [{
+                "orderHash": "0xfeed", "type": "Dutch_V2",
+                "input": { "token": "0x4200000000000000000000000000000000000006",
+                           "startAmount": "1000000000000000000", "endAmount": "1000000000000000000" },
+                "outputs": [{ "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                              "startAmount": "3100000000", "endAmount": "3000000000" }],
+                "createdAt": 1781943368,
+                "cosignerData": { "decayStartTime": 1781943392, "decayEndTime": 1781943452 }
+            }] }"#,
+        )
+        .unwrap();
+        let intent = UniswapXIngest::normalize(ChainId::BASE, &page.orders[0]).unwrap();
+        assert_eq!(intent.deadline.timestamp(), 1781943452, "deadline = cosigner decayEndTime");
+        assert!(intent.deadline > intent.observed_at, "deadline must be in the future of observation");
     }
 
     #[test]
