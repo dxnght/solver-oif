@@ -210,6 +210,7 @@ mod tests {
             id: "uniswapx:a".into(),
             route_key: "base->arbitrum/0x8335…2913->0xaf88…5831".into(),
             modeled_profit_usd: 4.20,
+            gas_usd: 0.09,
             confidence: 0.9,
             realized_margin_usd: Some(-0.30),
             verify_url: Some("https://arbiscan.io/tx/0xabc".into()),

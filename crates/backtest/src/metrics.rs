@@ -31,14 +31,32 @@ pub struct Metrics {
     pub profitable_quotes: usize,
     /// Sum of modeled `expected_profit_usd` over would_fill intents.
     pub modeled_profit_usd_sum: f64,
-    // --- calibration vs realized (price-only) ---
+    // --- calibration vs realized ---
     /// Intents (of any decision) that carry realized data we can price.
     pub with_realized: usize,
     /// would_fill intents that also carry priceable realized data.
     pub would_fill_with_realized: usize,
-    /// ...of those, how many had a positive realized gross margin (market
-    /// confirms there was margin to capture).
+    /// ...of those, how many had a positive realized **gross** margin (market
+    /// confirms there was *some* margin to capture, before our gas).
     pub would_fill_confirmed: usize,
+    /// ...of those, how many had a realized **net** margin (after our gas) at
+    /// or above `FillPolicy.min_margin_usd` — i.e. the market actually
+    /// supported a fill *by our own threshold*, not merely "any margin".
+    /// This is the honest upper bound against the bar we'd really bid at.
+    pub would_fill_market_supported: usize,
+    /// Sum of realized **gross** margin (price-only, no gas) over the
+    /// would_fill-with-realized set. Pairs with `modeled_profit_usd_sum`.
+    pub realized_margin_usd_sum: f64,
+    /// Sum of realized **net** margin (gross − our gas) over the same set.
+    /// This is the like-for-like counterpart to `modeled_profit_usd_sum`,
+    /// which is also net of our gas — net↔net, so the gap is honest.
+    pub realized_net_usd_sum: f64,
+    /// Per-fill `drift = modeled_net − realized_net` over the
+    /// would_fill-with-realized set. Positive = we over-modeled the profit
+    /// (the over-optimism we are trying to make inspectable). Kept as raw
+    /// samples so the report can show the *shape* (percentiles), not just a
+    /// mean that hides a fat tail.
+    pub drift_samples_usd: Vec<f64>,
 }
 
 impl Metrics {
@@ -49,11 +67,50 @@ impl Metrics {
     }
 
     /// Of the would_fill intents we can check against realized data, the share
-    /// the market confirms had margin. `None` when there's nothing to check —
-    /// the honest answer until real data lands (don't fabricate a number).
+    /// the market confirms had **any** gross margin (realized gross > 0).
+    /// `None` when there's nothing to check — the honest answer until real
+    /// data lands (don't fabricate a number). This is a generous bar: "was
+    /// there margin here at all?", not "could *we* have profited?".
     pub fn would_fill_precision(&self) -> Option<f64> {
         (self.would_fill_with_realized > 0)
             .then(|| self.would_fill_confirmed as f64 / self.would_fill_with_realized as f64)
+    }
+
+    /// Stricter precision: of the checkable would_fill intents, the share whose
+    /// realized **net** margin cleared our own `min_margin_usd` bar — "could we
+    /// have been in the green by our threshold?". The honest upper bound vs the
+    /// bar we'd actually bid at. `None` when nothing is checkable.
+    pub fn would_fill_market_supported_precision(&self) -> Option<f64> {
+        (self.would_fill_with_realized > 0).then(|| {
+            self.would_fill_market_supported as f64 / self.would_fill_with_realized as f64
+        })
+    }
+
+    /// Mean per-fill drift (modeled_net − realized_net) over the checkable set.
+    /// `None` when there are no drift samples. A mean alone hides the tail —
+    /// pair with [`Self::drift_percentiles`].
+    pub fn mean_drift_usd(&self) -> Option<f64> {
+        (!self.drift_samples_usd.is_empty())
+            .then(|| self.drift_samples_usd.iter().sum::<f64>() / self.drift_samples_usd.len() as f64)
+    }
+
+    /// Distribution shape of the drift samples as
+    /// `[p10, p25, p50, p75, p90, min, max]`. `None` when there are no
+    /// samples — we return `Option` rather than a fabricated all-zero array
+    /// (no inventing a distribution that isn't there, CLAUDE.md rule #2).
+    /// Nearest-rank on the `n-1` scale; for tiny samples the report labels the
+    /// percentiles as indicative.
+    pub fn drift_percentiles(&self) -> Option<[f64; 7]> {
+        if self.drift_samples_usd.is_empty() {
+            return None;
+        }
+        let mut s = self.drift_samples_usd.clone();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pick = |p: f64| -> f64 {
+            let idx = ((p * (s.len() - 1) as f64).round() as usize).min(s.len() - 1);
+            s[idx]
+        };
+        Some([pick(0.10), pick(0.25), pick(0.50), pick(0.75), pick(0.90), s[0], s[s.len() - 1]])
     }
 }
 
@@ -63,12 +120,31 @@ impl Metrics {
 pub struct FillRow {
     pub id: String,
     pub route_key: String,
+    /// Modeled profit, **net of our gas** (the router's `expected_profit_usd`).
     pub modeled_profit_usd: f64,
+    /// Our modeled gas cost for this fill (USD). Carried so the report can put
+    /// `realized_margin` (price-only, gross) on the same net footing as the
+    /// modeled number: `realized_net = realized_margin − gas_usd`.
+    pub gas_usd: f64,
     pub confidence: f64,
-    /// Price-only realized gross margin, when known — lets the reader see the
-    /// model vs reality gap per row.
+    /// Price-only realized **gross** margin, when known — lets the reader see
+    /// the model vs reality gap per row.
     pub realized_margin_usd: Option<f64>,
     pub verify_url: Option<String>,
+}
+
+impl FillRow {
+    /// Realized margin put on the same footing as `modeled_profit_usd`: gross
+    /// price-spread minus *our* modeled gas. `None` when no realized data.
+    pub fn realized_net_usd(&self) -> Option<f64> {
+        self.realized_margin_usd.map(|m| m - self.gas_usd)
+    }
+
+    /// `modeled_net − realized_net` for this fill — positive = over-modeled.
+    /// `None` when there's no realized data to compare against.
+    pub fn drift_usd(&self) -> Option<f64> {
+        self.realized_net_usd().map(|rn| self.modeled_profit_usd - rn)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,14 +202,25 @@ pub async fn compute(
                         id: intent.id.0.clone(),
                         route_key: intent.route_key(),
                         modeled_profit_usd: q.expected_profit_usd,
+                        gas_usd: q.gas_usd,
                         confidence: q.confidence,
                         realized_margin_usd: realized_margin,
                         verify_url: intent.verify_url(),
                     });
                     if let Some(rm) = realized_margin {
+                        // Put realized on the same net footing as the modeled
+                        // number before computing drift (net↔net), so the gap
+                        // isn't inflated by comparing net-of-gas to gross.
+                        let realized_net = rm - q.gas_usd;
                         m.would_fill_with_realized += 1;
+                        m.realized_margin_usd_sum += rm;
+                        m.realized_net_usd_sum += realized_net;
+                        m.drift_samples_usd.push(q.expected_profit_usd - realized_net);
                         if rm > 0.0 {
                             m.would_fill_confirmed += 1;
+                        }
+                        if realized_net >= policy.min_margin_usd {
+                            m.would_fill_market_supported += 1;
                         }
                     }
                 }
@@ -215,10 +302,33 @@ mod tests {
         assert_eq!(m.would_fill_with_realized, 2);
         assert_eq!(m.would_fill_confirmed, 1);
         assert!((m.would_fill_precision().unwrap() - 0.5).abs() < 1e-9);
-        // Fills sorted by modeled profit desc, both carry a verify URL.
+
+        // Gross/net reconciliation (WFC-5). Gas on Arbitrum = 0.00003 ETH ×
+        // $3000 = $0.09. Hand-computed per intent (net↔net drift):
+        //   a: modeled 9.91, realized_gross +5.0, realized_net 4.91, drift 5.0
+        //   b: modeled 9.91, realized_gross −2.0, realized_net −2.09, drift 12.0
+        assert!((m.realized_margin_usd_sum - 3.0).abs() < 1e-6, "gross sum {}", m.realized_margin_usd_sum);
+        assert!((m.realized_net_usd_sum - 2.82).abs() < 1e-6, "net sum {}", m.realized_net_usd_sum);
+        assert!((m.mean_drift_usd().unwrap() - 8.5).abs() < 1e-6, "mean drift {:?}", m.mean_drift_usd());
+        let p = m.drift_percentiles().expect("samples present");
+        assert!((p[5] - 5.0).abs() < 1e-6, "min drift {}", p[5]); // min
+        assert!((p[6] - 12.0).abs() < 1e-6, "max drift {}", p[6]); // max
+        assert!((p[2] - 12.0).abs() < 1e-6, "p50 drift {}", p[2]); // p50 (nearest-rank, n=2)
+
+        // Stricter precision: only intent a's realized_net (4.91) clears our
+        // $0.50 bar; b's (−2.09) does not → market_supported = 1, precision 0.5.
+        assert_eq!(m.would_fill_market_supported, 1);
+        assert!((m.would_fill_market_supported_precision().unwrap() - 0.5).abs() < 1e-9);
+
+        // Fills sorted by modeled profit desc, both carry a verify URL and the
+        // gas needed to put realized on a net footing.
         assert_eq!(out.fills.len(), 2);
         assert!(out.fills[0].modeled_profit_usd >= out.fills[1].modeled_profit_usd);
         assert!(out.fills.iter().all(|r| r.verify_url.is_some()));
+        // Per-row drift helper agrees with the aggregate (a: 5.0, b: 12.0).
+        let mut drifts: Vec<f64> = out.fills.iter().filter_map(|r| r.drift_usd()).collect();
+        drifts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((drifts[0] - 5.0).abs() < 1e-6 && (drifts[1] - 12.0).abs() < 1e-6, "row drifts {drifts:?}");
     }
 
     /// With no realized data anywhere, precision is `None` — we refuse to
