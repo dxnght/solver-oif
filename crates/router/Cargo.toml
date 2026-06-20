@@ -7,5 +7,10 @@ license     = { workspace = true }
 [dependencies]
 solver-types     = { workspace = true }
 solver-pricing   = { workspace = true }
+alloy-primitives = { workspace = true }
+chrono           = { workspace = true }
 serde            = { workspace = true }
-anyhow           = { workspace = true }
+
+[dev-dependencies]
+tokio            = { workspace = true }
+serde_json       = { workspace = true }
