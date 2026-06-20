@@ -10,9 +10,11 @@
 pub mod load;
 pub mod metrics;
 pub mod report;
+pub mod route_summary;
 
 pub use load::{load_intents, LoadStats};
 pub use metrics::{compute, BacktestOutput, FillRow, Metrics};
+pub use route_summary::RouteSummary;
 
 use std::path::Path;
 

@@ -16,6 +16,8 @@ use solver_pricing::StaticGasModel;
 use solver_router::{PriceFeed, QuoteOutcome, RouterV0, StaticPriceFeed};
 use solver_types::{FillPolicy, NormalizedIntent};
 
+use crate::route_summary::RouteSummary;
+
 /// Aggregate counts over a backtest run. All USD figures are MODELED on static
 /// prices — the report labels them so.
 #[derive(Debug, Clone, Default)]
@@ -152,6 +154,8 @@ pub struct BacktestOutput {
     pub metrics: Metrics,
     /// would_fill intents, highest modeled profit first.
     pub fills: Vec<FillRow>,
+    /// Per-route calibration roll-ups, most-observed route first (WFC-6).
+    pub routes: Vec<RouteSummary>,
 }
 
 /// Run the router + policy over `intents` and aggregate. Async because the gas
@@ -164,12 +168,22 @@ pub async fn compute(
     let router = RouterV0::new(prices, StaticGasModel);
     let mut m = Metrics { total: intents.len(), ..Default::default() };
     let mut fills: Vec<FillRow> = Vec::new();
+    let mut routes: BTreeMap<String, RouteSummary> = BTreeMap::new();
 
     for intent in intents {
         let realized_margin = intent.realized_gross_margin_usd(|t| prices.usd_price(t));
         if realized_margin.is_some() {
             m.with_realized += 1;
         }
+
+        // Count every observation against its route up front (any decision),
+        // so `n` reads as "intents on this route", not "fills". Re-borrowed via
+        // get_mut below in the fill branch to avoid holding it across the await.
+        let rk = intent.route_key();
+        routes
+            .entry(rk.clone())
+            .or_insert_with(|| RouteSummary::empty(rk.clone()))
+            .n += 1;
 
         // Evaluate as of when the order is open to a *generic* filler — i.e.
         // when its Dutch auction starts (exclusivity, if any, ends there). For
@@ -196,11 +210,14 @@ pub async fn compute(
                 *m.fill_reasons.entry(reason.as_str().to_string()).or_default() += 1;
 
                 if fill {
+                    let route = routes.get_mut(&rk).expect("route inserted above");
                     m.would_fill += 1;
                     m.modeled_profit_usd_sum += q.expected_profit_usd;
+                    route.would_fill += 1;
+                    route.modeled_sum += q.expected_profit_usd;
                     fills.push(FillRow {
                         id: intent.id.0.clone(),
-                        route_key: intent.route_key(),
+                        route_key: rk.clone(),
                         modeled_profit_usd: q.expected_profit_usd,
                         gas_usd: q.gas_usd,
                         confidence: q.confidence,
@@ -212,15 +229,23 @@ pub async fn compute(
                         // number before computing drift (net↔net), so the gap
                         // isn't inflated by comparing net-of-gas to gross.
                         let realized_net = rm - q.gas_usd;
+                        let drift = q.expected_profit_usd - realized_net;
+                        let confirmed = rm > 0.0;
+                        let supported = realized_net >= policy.min_margin_usd;
                         m.would_fill_with_realized += 1;
                         m.realized_margin_usd_sum += rm;
                         m.realized_net_usd_sum += realized_net;
-                        m.drift_samples_usd.push(q.expected_profit_usd - realized_net);
-                        if rm > 0.0 {
+                        m.drift_samples_usd.push(drift);
+                        route.would_fill_with_realized += 1;
+                        route.realized_net_sum += realized_net;
+                        route.drift_sum += drift;
+                        if confirmed {
                             m.would_fill_confirmed += 1;
+                            route.confirmed += 1;
                         }
-                        if realized_net >= policy.min_margin_usd {
+                        if supported {
                             m.would_fill_market_supported += 1;
+                            route.market_supported += 1;
                         }
                     }
                 }
@@ -233,7 +258,10 @@ pub async fn compute(
             .partial_cmp(&a.modeled_profit_usd)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    BacktestOutput { metrics: m, fills }
+    // Most-observed route first; route_key tiebreak keeps the order stable.
+    let mut routes: Vec<RouteSummary> = routes.into_values().collect();
+    routes.sort_by(|a, b| b.n.cmp(&a.n).then_with(|| a.route_key.cmp(&b.route_key)));
+    BacktestOutput { metrics: m, fills, routes }
 }
 
 #[cfg(test)]
@@ -329,6 +357,19 @@ mod tests {
         let mut drifts: Vec<f64> = out.fills.iter().filter_map(|r| r.drift_usd()).collect();
         drifts.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert!((drifts[0] - 5.0).abs() < 1e-6 && (drifts[1] - 12.0).abs() < 1e-6, "row drifts {drifts:?}");
+
+        // Per-route roll-up (WFC-6): all three share one route. n counts every
+        // observation (3); would_fill 2; checkable 2; confirmed/supported 1
+        // each → precision 0.5; mean drift 8.5; sums match the aggregate.
+        assert_eq!(out.routes.len(), 1);
+        let r = &out.routes[0];
+        assert_eq!((r.n, r.would_fill, r.would_fill_with_realized), (3, 2, 2));
+        assert_eq!((r.confirmed, r.market_supported), (1, 1));
+        assert!((r.precision().unwrap() - 0.5).abs() < 1e-9);
+        assert!((r.market_supported_precision().unwrap() - 0.5).abs() < 1e-9);
+        assert!((r.mean_drift().unwrap() - 8.5).abs() < 1e-6, "route mean drift {:?}", r.mean_drift());
+        assert!((r.modeled_sum - 19.82).abs() < 1e-6, "route modeled {}", r.modeled_sum);
+        assert!((r.realized_net_sum - 2.82).abs() < 1e-6, "route realized_net {}", r.realized_net_sum);
     }
 
     /// With no realized data anywhere, precision is `None` — we refuse to

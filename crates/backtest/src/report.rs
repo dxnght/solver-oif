@@ -215,7 +215,7 @@ mod tests {
             realized_margin_usd: Some(-0.30),
             verify_url: Some("https://arbiscan.io/tx/0xabc".into()),
         }];
-        (load, BacktestOutput { metrics: m, fills })
+        (load, BacktestOutput { metrics: m, fills, routes: vec![] })
     }
 
     /// A non-empty run renders the load/decisions/calibration sections, labels
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn empty_run_is_loud_with_next_step() {
         let load = LoadStats::default();
-        let out = BacktestOutput { metrics: Metrics::default(), fills: vec![] };
+        let out = BacktestOutput { metrics: Metrics::default(), fills: vec![], routes: vec![] };
         let md = render_summary(&load, &out);
         assert!(md.contains("No data"));
         assert!(md.contains("solver ingest uniswapx"));
