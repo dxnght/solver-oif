@@ -11,7 +11,7 @@ mod intent;
 mod quote;
 mod settlement;
 
-pub use amount::{known_decimals, AssetAmount, TokenRef};
+pub use amount::{asset_class, known_decimals, AssetAmount, AssetClass, TokenRef};
 pub use chain::ChainId;
 pub use fill::{FillPolicy, FillReason};
 pub use intent::{DutchDecay, ExclusivityWindow, IntentId, NormalizedIntent, Source, TxRef};
