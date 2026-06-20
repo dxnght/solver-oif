@@ -95,7 +95,19 @@ pub async fn compute(
             m.with_realized += 1;
         }
 
-        match router.quote(intent, intent.observed_at).await {
+        // Evaluate as of when the order is open to a *generic* filler — i.e.
+        // when its Dutch auction starts (exclusivity, if any, ends there). For
+        // a no-decay intent there's no auction, so observation time stands in.
+        // This measures profitability of the flow, not winnability: a generic
+        // filler is genuinely locked out only during exclusivity, which has
+        // ended by decay-start (CLAUDE.md: profitable_quote_rate ≠ win rate).
+        let eval_at = intent
+            .output_decay
+            .as_ref()
+            .map(|d| d.start_time)
+            .unwrap_or(intent.observed_at);
+
+        match router.quote(intent, eval_at).await {
             QuoteOutcome::Skipped(r) => {
                 *m.skipped.entry(r.as_str().to_string()).or_default() += 1;
             }

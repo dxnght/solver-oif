@@ -40,7 +40,11 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
         s,
         "> All USD figures are **MODELED on static reference prices**, not live \
          quotes. `would_fill` is a model belief; it is validated against realized \
-         outcomes below and is never presented as realized profit.\n"
+         outcomes below and is never presented as realized profit. Modeled profit \
+         assumes a fill at the auction's `output_min` floor (an **upper bound**); \
+         the realized column shows what the winning filler actually captured. \
+         Volatile-asset routes are priced too unreliably on static prices to be \
+         trusted and never count as would_fill (they show as *suspect*).\n"
     );
 
     if m.total == 0 {
@@ -73,7 +77,9 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
         Some(r) => {
             let _ = writeln!(
                 s,
-                "- profitable_quote_rate: {:.1}% ({}/{}) — *not a win rate*",
+                "- profitable_quote_rate: {:.1}% ({}/{}) — *not a win rate*; counts \
+                 positive modeled profit incl. low-confidence/suspect quotes, so it \
+                 overstates actionable profit (see would_fill for the trusted set)",
                 r * 100.0,
                 m.profitable_quotes,
                 m.quoted

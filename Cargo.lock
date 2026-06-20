@@ -2222,6 +2222,7 @@ dependencies = [
 name = "solver-backtest"
 version = "0.0.1"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "chrono",
  "serde",
@@ -2229,6 +2230,7 @@ dependencies = [
  "solver-pricing",
  "solver-router",
  "solver-types",
+ "tokio",
 ]
 
 [[package]]
@@ -2278,10 +2280,13 @@ dependencies = [
 name = "solver-router"
 version = "0.0.1"
 dependencies = [
- "anyhow",
+ "alloy-primitives",
+ "chrono",
  "serde",
+ "serde_json",
  "solver-pricing",
  "solver-types",
+ "tokio",
 ]
 
 [[package]]
