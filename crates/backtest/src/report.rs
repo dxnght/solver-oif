@@ -20,6 +20,11 @@ use crate::metrics::BacktestOutput;
 const MAX_FILL_ROWS: usize = 25;
 /// Worst-drift inspection list size (WFC-7).
 const MAX_DRIFT_ROWS: usize = 10;
+/// Per-route rows shown before collapsing the rest into a "+N more" line.
+const MAX_ROUTE_ROWS: usize = 20;
+/// Below this many checkable fills, precision/percentiles are flagged as
+/// indicative — a tiny sample doesn't earn a confident rate.
+const SMALL_SAMPLE: usize = 30;
 
 /// Render a verify-link table cell: a clickable `[tx](url)` or "—" when there
 /// is no link to show. Never a fabricated URL (the verify-link discipline).
@@ -28,6 +33,79 @@ fn verify_cell(url: &Option<String>) -> String {
         Some(u) => format!("[tx]({u})"),
         None => "—".to_string(),
     }
+}
+
+/// A rate cell: a percentage, or "—" when the rate is `None` (uncheckable).
+/// We show "—", never a fabricated 0%, so absence reads differently from zero.
+fn pct_cell(v: Option<f64>) -> String {
+    match v {
+        Some(p) => format!("{:.0}%", p * 100.0),
+        None => "—".to_string(),
+    }
+}
+
+/// A money cell: a 2-dp USD figure, or "—" when `None` (not computable).
+fn money_cell(v: Option<f64>) -> String {
+    match v {
+        Some(x) => format!("{x:.2}"),
+        None => "—".to_string(),
+    }
+}
+
+/// Per-route calibration table (WFC-6): the spec's "which routes are stably in
+/// the green?" shown per route. Calibration only applies where we'd bid, so the
+/// table shows the `would_fill` routes (ordered by intents seen) — not the
+/// high-volume routes we always skip, which would otherwise fill the top with a
+/// wall of "—" and bury the answer (legibility, rule #7). The full per-route
+/// set, sorted by n, is in `metrics.json`. Every USD figure is net of our gas;
+/// a would_fill route with no realized data to check still shows "—" there.
+fn render_routes(s: &mut String, out: &BacktestOutput) {
+    let _ = writeln!(s, "## Per-route calibration (would_fill routes, top {MAX_ROUTE_ROWS} by intents seen)\n");
+    let bid: Vec<_> = out.routes.iter().filter(|r| r.would_fill > 0).collect();
+    if bid.is_empty() {
+        // The honest §3 answer when nothing cleared the policy: "none".
+        let _ = writeln!(
+            s,
+            "_No route produced a would_fill across {} routes observed — by this run \
+             there is no route we'd bid (a valid result: none stably in the green)._\n",
+            out.routes.len()
+        );
+        return;
+    }
+    let _ = writeln!(
+        s,
+        "`prec(>0)` = any gross margin on the route; `prec(≥m)` = cleared our own \
+         min_margin bar. **All USD net of our gas**; `mean_drift` > 0 = we \
+         over-modeled. `—` = no realized data on that route to check. {} of {} \
+         observed routes produced a would_fill.\n",
+        bid.len(),
+        out.routes.len()
+    );
+    let _ = writeln!(
+        s,
+        "| route | n | would_fill | prec(>0) | prec(≥m) | modeled_net $ | realized_net $ | mean_drift $ |"
+    );
+    let _ = writeln!(s, "|---|--:|--:|--:|--:|--:|--:|--:|");
+    for r in bid.iter().take(MAX_ROUTE_ROWS) {
+        // "—" rather than a misleading 0.00 when there's nothing in the column.
+        let realized = (r.would_fill_with_realized > 0).then_some(r.realized_net_sum);
+        let _ = writeln!(
+            s,
+            "| {} | {} | {} | {} | {} | {:.2} | {} | {} |",
+            r.route_key,
+            r.n,
+            r.would_fill,
+            pct_cell(r.precision()),
+            pct_cell(r.market_supported_precision()),
+            r.modeled_sum,
+            money_cell(realized),
+            money_cell(r.mean_drift()),
+        );
+    }
+    if bid.len() > MAX_ROUTE_ROWS {
+        let _ = writeln!(s, "\n_+{} more would_fill routes (full per-route set in metrics.json)_", bid.len() - MAX_ROUTE_ROWS);
+    }
+    let _ = writeln!(s);
 }
 
 /// Write `summary.md` + `metrics.json` into `out_dir` (created if absent).
@@ -122,27 +200,72 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
     }
 
     // --- Calibration ---
+    let n = m.would_fill_with_realized;
     let _ = writeln!(s, "## would_fill calibration (model vs realized)\n");
     let _ = writeln!(s, "- intents with priceable realized data: {}", m.with_realized);
-    let _ = writeln!(s, "- would_fill that also have realized data: {}", m.would_fill_with_realized);
-    let _ = writeln!(s, "- confirmed (realized gross margin > 0): {}", m.would_fill_confirmed);
-    match m.would_fill_precision() {
-        Some(p) => {
+    let _ = writeln!(s, "- would_fill that also have realized data (N): **{n}**");
+    if n == 0 {
+        let _ = writeln!(
+            s,
+            "- precision / drift: **n/a** — no would_fill intent carried priceable \
+             realized data, so there is nothing to calibrate against (we refuse to \
+             fabricate a number).\n"
+        );
+    } else {
+        let caveat = if n < SMALL_SAMPLE {
+            format!(" *(N={n} — small sample; precision and percentiles are indicative)*")
+        } else {
+            String::new()
+        };
+        // Two precisions, both explicitly labeled (generous bar vs our own bar).
+        let _ = writeln!(
+            s,
+            "- **precision(>0): {:.1}%** ({}/{}) — was there *any* gross margin here at all?",
+            m.would_fill_precision().unwrap() * 100.0,
+            m.would_fill_confirmed,
+            n
+        );
+        let _ = writeln!(
+            s,
+            "- **precision(≥margin): {:.1}%** ({}/{}) — could *we* have been in the green \
+             by our own min_margin bar? (the honest cut){}",
+            m.would_fill_market_supported_precision().unwrap() * 100.0,
+            m.would_fill_market_supported,
+            n,
+            caveat
+        );
+        // Net↔net sums over the same N checkable fills — like-for-like.
+        let modeled_net_checked: f64 = out
+            .fills
+            .iter()
+            .filter(|r| r.realized_margin_usd.is_some())
+            .map(|r| r.modeled_profit_usd)
+            .sum();
+        let _ = writeln!(
+            s,
+            "- modeled_net **${:.2}** vs realized_net **${:.2}** over those {} fills — \
+             **both net of our gas** (like-for-like); the per-fill gap is the drift below.",
+            modeled_net_checked, m.realized_net_usd_sum, n
+        );
+        // Drift distribution — the *shape* of the over-optimism, not just a mean.
+        if let (Some(mean), Some(p)) = (m.mean_drift_usd(), m.drift_percentiles()) {
             let _ = writeln!(
                 s,
-                "- **would_fill_precision: {:.1}%** — of the fills we can check, the \
-                 share the market confirms had margin.\n",
-                p * 100.0
+                "- drift (modeled_net − realized_net), mean **${:.2}** — positive = we \
+                 over-modeled. Distribution (USD):",
+                mean
             );
-        }
-        None => {
             let _ = writeln!(
                 s,
-                "- would_fill_precision: **n/a** — no would_fill intent carried \
-                 priceable realized data (don't fabricate a number).\n"
+                "  - p10 {:.2} · p25 {:.2} · p50 {:.2} · p75 {:.2} · p90 {:.2} · min {:.2} · max {:.2}",
+                p[0], p[1], p[2], p[3], p[4], p[5], p[6]
             );
         }
+        let _ = writeln!(s);
     }
+
+    // --- Per-route calibration (WFC-6) ---
+    render_routes(&mut s, out);
 
     // --- Worst over-optimism (WFC-7) ---
     // A separate sort of a *copy* by drift desc — leaves the modeled-profit
@@ -210,6 +333,31 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
 
 fn render_metrics_json(load: &LoadStats, out: &BacktestOutput) -> Result<String> {
     let m = &out.metrics;
+    let drift_percentiles = m.drift_percentiles().map(|p| {
+        json!({
+            "p10": p[0], "p25": p[1], "p50": p[2], "p75": p[3], "p90": p[4],
+            "min": p[5], "max": p[6],
+        })
+    });
+    let routes: Vec<_> = out
+        .routes
+        .iter()
+        .map(|r| {
+            json!({
+                "route_key": r.route_key,
+                "n": r.n,
+                "would_fill": r.would_fill,
+                "would_fill_with_realized": r.would_fill_with_realized,
+                "confirmed": r.confirmed,
+                "market_supported": r.market_supported,
+                "modeled_net_usd_sum": r.modeled_sum,
+                "realized_net_usd_sum": r.realized_net_sum,
+                "mean_drift_usd": r.mean_drift(),
+                "precision_gross_positive": r.precision(),
+                "precision_market_supported": r.market_supported_precision(),
+            })
+        })
+        .collect();
     let v = json!({
         "pricing": "static-reference (MODELED, not live)",
         "load": {
@@ -231,11 +379,19 @@ fn render_metrics_json(load: &LoadStats, out: &BacktestOutput) -> Result<String>
             "fill_reasons": m.fill_reasons,
         },
         "calibration": {
+            "note": "all USD net of our gas; drift = modeled_net − realized_net (positive = over-modeled)",
             "with_realized": m.with_realized,
             "would_fill_with_realized": m.would_fill_with_realized,
             "would_fill_confirmed": m.would_fill_confirmed,
+            "would_fill_market_supported": m.would_fill_market_supported,
             "would_fill_precision": m.would_fill_precision(),
+            "would_fill_market_supported_precision": m.would_fill_market_supported_precision(),
+            "realized_margin_usd_sum": m.realized_margin_usd_sum,
+            "realized_net_usd_sum": m.realized_net_usd_sum,
+            "mean_drift_usd": m.mean_drift_usd(),
+            "drift_percentiles_usd": drift_percentiles,
         },
+        "routes": routes,
     });
     serde_json::to_string_pretty(&v).context("serializing metrics.json")
 }
@@ -244,8 +400,14 @@ fn render_metrics_json(load: &LoadStats, out: &BacktestOutput) -> Result<String>
 mod tests {
     use super::*;
     use crate::metrics::{BacktestOutput, FillRow, Metrics};
+    use crate::route_summary::RouteSummary;
 
+    /// A coherent one-fill fixture: modeled_net 4.20, gas 0.09, realized_margin
+    /// −0.30 → realized_net −0.39, drift 4.59. Neither confirmed (gross < 0) nor
+    /// market-supported (net < $0.50). All the calibration fields are set to
+    /// match that single row so the render is internally consistent.
     fn sample() -> (LoadStats, BacktestOutput) {
+        let route_key = "base->arbitrum/0x8335…2913->0xaf88…5831".to_string();
         let load = LoadStats { files: 1, raw_lines: 3, kept: 3, duplicates: 0, malformed: 0, dropped_unknown_chain: 0 };
         let mut m = Metrics { total: 3, quoted: 3, would_fill: 1, profitable_quotes: 2, modeled_profit_usd_sum: 4.20, ..Default::default() };
         m.fill_reasons.insert("fill".into(), 1);
@@ -253,16 +415,31 @@ mod tests {
         m.with_realized = 1;
         m.would_fill_with_realized = 1;
         m.would_fill_confirmed = 0;
+        m.would_fill_market_supported = 0;
+        m.realized_margin_usd_sum = -0.30;
+        m.realized_net_usd_sum = -0.39;
+        m.drift_samples_usd = vec![4.59];
         let fills = vec![FillRow {
             id: "uniswapx:a".into(),
-            route_key: "base->arbitrum/0x8335…2913->0xaf88…5831".into(),
+            route_key: route_key.clone(),
             modeled_profit_usd: 4.20,
             gas_usd: 0.09,
             confidence: 0.9,
             realized_margin_usd: Some(-0.30),
             verify_url: Some("https://arbiscan.io/tx/0xabc".into()),
         }];
-        (load, BacktestOutput { metrics: m, fills, routes: vec![] })
+        let routes = vec![RouteSummary {
+            route_key,
+            n: 3,
+            would_fill: 1,
+            would_fill_with_realized: 1,
+            confirmed: 0,
+            market_supported: 0,
+            modeled_sum: 4.20,
+            realized_net_sum: -0.39,
+            drift_sum: 4.59,
+        }];
+        (load, BacktestOutput { metrics: m, fills, routes })
     }
 
     /// A non-empty run renders the load/decisions/calibration sections, labels
@@ -275,14 +452,56 @@ mod tests {
         assert!(md.contains("MODELED"));
         assert!(md.contains("## Decisions"));
         assert!(md.contains("would_fill calibration"));
-        assert!(md.contains("would_fill_precision: 0.0%"));
         assert!(md.contains("[tx](https://arbiscan.io/tx/0xabc)"), "verify link must render");
         assert!(md.contains("not a win rate"));
-        // Worst-drift section renders the net-footed row: modeled 4.20, gas
-        // 0.09, realized_margin −0.30 → realized_net −0.39, drift 4.59.
+        assert!(!md.contains("annualized"), "no annualized projections (rule #1)");
+
+        // Both precisions, both labeled (WFC-8). The fixture row is neither
+        // confirmed nor market-supported → both read 0.0%.
+        assert!(md.contains("precision(>0): 0.0%"));
+        assert!(md.contains("precision(≥margin): 0.0%"));
+        assert!(md.contains("any* gross margin here at all"));
+        assert!(md.contains("in the green"));
+        // Net↔net footing caption is present and the small-N caveat fires.
+        assert!(md.contains("both net of our gas"));
+        assert!(md.contains("small sample"));
+
+        // Drift distribution renders (single sample 4.59 → every percentile 4.59).
+        assert!(md.contains("Distribution (USD)"));
+        assert!(md.contains("p50 4.59"));
+
+        // Per-route section renders the one route with its mean drift.
+        assert!(md.contains("## Per-route calibration"));
+        assert!(md.contains("mean_drift"));
+
+        // Worst-drift section renders the net-footed row: realized_net −0.39,
+        // drift 4.59.
         assert!(md.contains("## Worst over-optimism"));
         assert!(md.contains("-0.39"), "realized_net must be net of gas");
         assert!(md.contains("4.59"), "drift must be net↔net");
+    }
+
+    /// metrics.json carries the WFC-5/6 fields: both precisions, the drift
+    /// percentiles, and the per-route array — so a machine reader gets the
+    /// same calibration depth as the human summary.
+    #[test]
+    fn metrics_json_has_calibration_depth_and_routes() {
+        let (load, out) = sample();
+        let js = render_metrics_json(&load, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&js).unwrap();
+        let cal = &v["calibration"];
+        assert_eq!(cal["would_fill_market_supported"], 0);
+        assert_eq!(cal["would_fill_precision"], 0.0);
+        assert_eq!(cal["would_fill_market_supported_precision"], 0.0);
+        assert!((cal["realized_net_usd_sum"].as_f64().unwrap() - (-0.39)).abs() < 1e-9);
+        assert!((cal["mean_drift_usd"].as_f64().unwrap() - 4.59).abs() < 1e-9);
+        assert!((cal["drift_percentiles_usd"]["p50"].as_f64().unwrap() - 4.59).abs() < 1e-9);
+        // Per-route array present and self-describing.
+        let routes = v["routes"].as_array().unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["n"], 3);
+        assert_eq!(routes[0]["would_fill"], 1);
+        assert!((routes[0]["mean_drift_usd"].as_f64().unwrap() - 4.59).abs() < 1e-9);
     }
 
     /// The worst-drift list sorts a *copy* by drift desc and excludes rows with
