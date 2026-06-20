@@ -29,6 +29,12 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
 - **Єдиний `FillPolicy`** — «fill» означає одне в live і backtest (один код-шлях).
 - **would_fill-калібрування — наповнене реальними даними**: на ~1090 живих UniswapX-
   інтентах would_fill_precision ≈ **43%** (модель оптимістична проти realized).
+- **Калібрування поглиблене (B1, WFC-5..8)**: margin-drift рахується **net↔net**
+  (realized_net = realized − наш газ) із розподілом (перцентилі), **дві** precision
+  (`>0` = чи була маржа взагалі; `≥ our min_margin` = чи могли б ми бути в плюсі),
+  per-route розбивка (відповідь спеці §3) і top-10 worst-drift із verify-links —
+  усе в `summary.md` + `metrics.json`. Над-оптимізм тепер інспектований, не лише
+  усереднений.
 - **Verify-links** — `TxRef` → block-explorer; лише верифіковані домени, `None`/`—` для
   невідомих. У звіті кожен fill несе клікабельний tx-лінк.
 - **`solver doctor`** — read-only preflight без мережі: каже, що дасть дані до прогону.
@@ -51,9 +57,10 @@ static-ціни (та ще й тавтологічної: модель і realiz
 
 ## Найближче (порядок із ROADMAP)
 1. ✅ **B0 — verified core**: `doctor` + no-key цикл із verify-links + зелений CI — **зроблено**.
-2. **B1 (наступне)** — поглибити would_fill-калібрування: margin-drift, розбивка по
-   маршрутах, dest_summary. (Машинерія є; precision-число вже реальне.)
-3. **B2** — поточні Across-події + Etherscan-V2 проба в `doctor` (відкладена з B0:
+2. ✅ **B1 — would_fill-калібрування поглиблене**: net↔net margin-drift + розподіл,
+   дві precision, per-route summary, top-10 worst-drift — **зроблено** (WFC-5..8).
+   (`dest_summary` — окремо, за потреби.)
+3. **B2 (наступне)** — поточні Across-події + Etherscan-V2 проба в `doctor` (відкладена з B0:
    немає Across-шляху, що споживає V2 block-times — не будувати передчасну ширину).
 4. **B3** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз навмисно
    нижче порога на static-цінах).
