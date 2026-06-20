@@ -18,6 +18,17 @@ use crate::load::LoadStats;
 use crate::metrics::BacktestOutput;
 
 const MAX_FILL_ROWS: usize = 25;
+/// Worst-drift inspection list size (WFC-7).
+const MAX_DRIFT_ROWS: usize = 10;
+
+/// Render a verify-link table cell: a clickable `[tx](url)` or "—" when there
+/// is no link to show. Never a fabricated URL (the verify-link discipline).
+fn verify_cell(url: &Option<String>) -> String {
+    match url {
+        Some(u) => format!("[tx]({u})"),
+        None => "—".to_string(),
+    }
+}
 
 /// Write `summary.md` + `metrics.json` into `out_dir` (created if absent).
 pub fn write_report(out_dir: &Path, load: &LoadStats, out: &BacktestOutput) -> Result<()> {
@@ -133,6 +144,46 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
         }
     }
 
+    // --- Worst over-optimism (WFC-7) ---
+    // A separate sort of a *copy* by drift desc — leaves the modeled-profit
+    // ordering of `out.fills` untouched. Only rows with realized data have a
+    // computable drift, so the rest are filtered out (not shown as 0).
+    let _ = writeln!(s, "## Worst over-optimism (top {} by drift)\n", MAX_DRIFT_ROWS);
+    let mut worst: Vec<_> = out.fills.iter().filter(|r| r.drift_usd().is_some()).collect();
+    if worst.is_empty() {
+        let _ = writeln!(
+            s,
+            "_None — no would_fill carried priceable realized data to compare against._\n"
+        );
+    } else {
+        worst.sort_by(|a, b| {
+            b.drift_usd()
+                .unwrap()
+                .partial_cmp(&a.drift_usd().unwrap())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let _ = writeln!(
+            s,
+            "Largest gaps where modeled_net beat realized_net (drift > 0 = we \
+             over-modeled). **modeled_net and realized_net are both net of our \
+             gas.** Click `verify` to check the realized fill on-chain.\n"
+        );
+        let _ = writeln!(s, "| route | modeled_net $ | realized_net $ | drift $ | verify |");
+        let _ = writeln!(s, "|---|--:|--:|--:|---|");
+        for r in worst.iter().take(MAX_DRIFT_ROWS) {
+            let _ = writeln!(
+                s,
+                "| {} | {:.2} | {:.2} | {:.2} | {} |",
+                r.route_key,
+                r.modeled_profit_usd,
+                r.realized_net_usd().unwrap(),
+                r.drift_usd().unwrap(),
+                verify_cell(&r.verify_url),
+            );
+        }
+        let _ = writeln!(s);
+    }
+
     // --- Verifiable fills ---
     let _ = writeln!(s, "## Verifiable fills (top {} by modeled profit)\n", MAX_FILL_ROWS);
     if out.fills.is_empty() {
@@ -145,14 +196,10 @@ pub fn render_summary(load: &LoadStats, out: &BacktestOutput) -> String {
                 Some(v) => format!("{v:.2}"),
                 None => "—".to_string(),
             };
-            let verify = match &r.verify_url {
-                Some(u) => format!("[tx]({u})"),
-                None => "—".to_string(),
-            };
             let _ = writeln!(
                 s,
                 "| {} | {:.2} | {:.2} | {} | {} |",
-                r.route_key, r.modeled_profit_usd, r.confidence, realized, verify
+                r.route_key, r.modeled_profit_usd, r.confidence, realized, verify_cell(&r.verify_url)
             );
         }
         let _ = writeln!(s);
@@ -231,6 +278,44 @@ mod tests {
         assert!(md.contains("would_fill_precision: 0.0%"));
         assert!(md.contains("[tx](https://arbiscan.io/tx/0xabc)"), "verify link must render");
         assert!(md.contains("not a win rate"));
+        // Worst-drift section renders the net-footed row: modeled 4.20, gas
+        // 0.09, realized_margin −0.30 → realized_net −0.39, drift 4.59.
+        assert!(md.contains("## Worst over-optimism"));
+        assert!(md.contains("-0.39"), "realized_net must be net of gas");
+        assert!(md.contains("4.59"), "drift must be net↔net");
+    }
+
+    /// The worst-drift list sorts a *copy* by drift desc and excludes rows with
+    /// no realized data (no drift to compute) — without disturbing the
+    /// modeled-profit ordering of the verifiable-fills table.
+    #[test]
+    fn worst_drift_orders_by_drift_desc_and_skips_unrealized() {
+        let load = LoadStats { files: 1, raw_lines: 3, kept: 3, duplicates: 0, malformed: 0, dropped_unknown_chain: 0 };
+        let m = Metrics { total: 3, quoted: 3, would_fill: 3, ..Default::default() };
+        let row = |key: &str, modeled: f64, realized: Option<f64>, url: Option<&str>| FillRow {
+            id: key.into(),
+            route_key: key.into(),
+            modeled_profit_usd: modeled,
+            gas_usd: 0.0,
+            confidence: 0.9,
+            realized_margin_usd: realized,
+            verify_url: url.map(Into::into),
+        };
+        // drift: r1 = 10−2 = 8, r2 = 5−4 = 1, r3 has no realized → excluded.
+        let fills = vec![
+            row("r1", 10.0, Some(2.0), Some("https://example/r1")),
+            row("r2", 5.0, Some(4.0), None),
+            row("r3", 3.0, None, None),
+        ];
+        let md = render_summary(&load, &BacktestOutput { metrics: m, fills, routes: vec![] });
+
+        let wd_start = md.find("## Worst over-optimism").unwrap();
+        let wd_end = md.find("## Verifiable fills").unwrap();
+        let wd = &md[wd_start..wd_end];
+        assert!(wd.find("r1").unwrap() < wd.find("r2").unwrap(), "higher drift first");
+        assert!(!wd.contains("r3"), "no realized data → no drift row");
+        assert!(wd.contains("8.00") && wd.contains("1.00"), "drift values render");
+        assert!(wd.contains("[tx](https://example/r1)"), "clickable verify link");
     }
 
     /// The empty case is loud and tells the reader exactly how to get data —
