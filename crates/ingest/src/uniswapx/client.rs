@@ -422,7 +422,7 @@ struct SettledAmount {
 
 #[cfg(test)]
 mod tests {
-    use super::{Order, OrdersPage, UniswapXIngest};
+    use super::{OrdersPage, UniswapXIngest};
     use alloy_primitives::{Address, U256};
     use solver_types::{ChainId, Source};
     use std::str::FromStr;

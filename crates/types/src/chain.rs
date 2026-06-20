@@ -171,33 +171,23 @@ mod tests {
         let hash = "0xABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         assert_eq!(
             ChainId::ETHEREUM.explorer_tx_url(hash),
-            Some(format!(
-                "https://etherscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            ))
+            Some("https://etherscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string())
         );
         assert_eq!(
             ChainId::OPTIMISM.explorer_tx_url(hash),
-            Some(format!(
-                "https://optimistic.etherscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            ))
+            Some("https://optimistic.etherscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string())
         );
         assert_eq!(
             ChainId::POLYGON.explorer_tx_url(hash),
-            Some(format!(
-                "https://polygonscan.com/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            ))
+            Some("https://polygonscan.com/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string())
         );
         assert_eq!(
             ChainId::BASE.explorer_tx_url(hash),
-            Some(format!(
-                "https://basescan.org/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            ))
+            Some("https://basescan.org/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string())
         );
         assert_eq!(
             ChainId::ARBITRUM.explorer_tx_url(hash),
-            Some(format!(
-                "https://arbiscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            ))
+            Some("https://arbiscan.io/tx/0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string())
         );
     }
 
