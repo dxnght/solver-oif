@@ -13,5 +13,7 @@
 //! analytics: the deposits side / unfilled-intent JOIN is a separate bucket.
 
 pub mod event;
+pub mod spoke_pool;
 
 pub use event::{addr_from_bytes32, FilledRelay, V3RelayExecutionEventInfo};
+pub use spoke_pool::{spoke_pool, ACROSS_CHAINS};
