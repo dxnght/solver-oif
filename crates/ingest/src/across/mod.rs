@@ -17,5 +17,5 @@ pub mod event;
 pub mod spoke_pool;
 
 pub use client::{AcrossIngest, AcrossIngestConfig, RawLog};
-pub use event::{addr_from_bytes32, FilledRelay, V3RelayExecutionEventInfo};
+pub use event::{addr_from_bytes32, FilledRelay, FundsDeposited, V3RelayExecutionEventInfo};
 pub use spoke_pool::{spoke_pool, ACROSS_CHAINS};
