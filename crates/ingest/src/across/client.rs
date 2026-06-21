@@ -21,22 +21,36 @@
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
+use alloy_primitives::B256;
+use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
-use serde::Deserialize;
-use solver_types::ChainId;
-use tracing::{info, warn};
+use serde::{Deserialize, Serialize};
+use solver_types::{
+    known_decimals, AssetAmount, ChainId, ExclusivityWindow, IntentId, NormalizedIntent,
+    SettlementType, Source, TokenRef, TxRef,
+};
+use tracing::{debug, info, warn};
 
 use crate::across::spoke_pool::{spoke_pool, ACROSS_CHAINS};
-use crate::across::FilledRelay;
-use alloy_sol_types::SolEvent;
+use crate::across::{addr_from_bytes32, FilledRelay};
+use crate::store::JsonlSink;
 
 /// Etherscan V2 multichain base (one host; `chainid` selects the chain).
 const ETHERSCAN_V2_BASE: &str = "https://api.etherscan.io/v2";
 
 /// Etherscan caps `getLogs` at 1000 records per call.
 const ETHERSCAN_LOGS_CAP: usize = 1000;
+
+/// Across settles relayer refunds optimistically through the HubPool
+/// root-bundle dispute window. The `FilledRelay` event does **not** carry this
+/// value, so we record the HubPool's configured `liveness()` — read on-chain
+/// from the canonical mainnet HubPool `0xc186…bEda` (= 1800s, 2026-06) — as a
+/// coarse, source-wide constant. It is descriptive metadata on the intent and
+/// feeds no metric (no router/backtest logic reads `challenge_window`); we keep
+/// it honest rather than fabricate a per-fill number the event can't give us.
+const ACROSS_OO_LIVENESS_SECS: i64 = 1800;
 
 #[derive(Debug, Clone)]
 pub struct AcrossIngestConfig {
@@ -106,8 +120,8 @@ impl AcrossIngest {
         Ok(total)
     }
 
-    /// Scan one destination chain's `FilledRelay` logs over `[since, until]`.
-    /// AX-3: fetch + count only — normalization and JSONL writing land in AX-4.
+    /// Scan one destination chain's `FilledRelay` logs over `[since, until]`,
+    /// normalizing each into a [`NormalizedIntent`] written as JSONL.
     async fn scan_chain(&self, chain: ChainId, since: u64, until: u64) -> Result<usize> {
         let spoke = spoke_pool(chain)
             .ok_or_else(|| anyhow::anyhow!("no verified SpokePool for {chain}; refusing to scan"))?;
@@ -119,16 +133,38 @@ impl AcrossIngest {
             return Ok(0);
         }
 
+        let out_path = self.cfg.out_dir.join(format!(
+            "across-{}-{}.jsonl",
+            chain.name(),
+            Utc::now().format("%Y%m%d")
+        ));
+        // Lazy sink — only create the file once a fill normalizes, so a chain
+        // with no in-window fills leaves no confusing 0-byte artifact (mirrors
+        // the UniswapX ingest; legibility, rule #7).
+        let mut sink: Option<JsonlSink> = None;
+
         let spoke_hex = spoke.to_string(); // EIP-55 0x… address
         let mut cursor = from_block;
-        let mut fetched = 0usize;
+        let mut written = 0usize;
         loop {
             let logs = self.get_logs(chain, &spoke_hex, cursor, to_block).await?;
             if logs.is_empty() {
                 break;
             }
             let last_block = logs.last().and_then(|l| l.block_number()).unwrap_or(cursor);
-            fetched += logs.len();
+
+            for log in &logs {
+                match Self::normalize(chain, log) {
+                    Ok(intent) => {
+                        if sink.is_none() {
+                            sink = Some(JsonlSink::open(&out_path).await?);
+                        }
+                        sink.as_mut().unwrap().write(&intent).await?;
+                        written += 1;
+                    }
+                    Err(e) => debug!(chain = %chain, error = %e, "skipping across fill"),
+                }
+            }
 
             if logs.len() < ETHERSCAN_LOGS_CAP {
                 break; // window drained
@@ -148,8 +184,93 @@ impl AcrossIngest {
             }
         }
 
-        info!(chain = %chain, fetched, "across chain scan (normalize pending AX-4)");
-        Ok(fetched)
+        match sink {
+            Some(mut s) => s.flush().await?,
+            None => info!(chain = %chain, "no in-window fills — no file written"),
+        }
+        info!(chain = %chain, written, "across chain done");
+        Ok(written)
+    }
+
+    /// FilledRelay log → [`NormalizedIntent`].
+    ///
+    /// origin = the event's `originChainId`; dest = the chain we scanned (the
+    /// SpokePool that emitted the fill). `outputAmount` is the promised minimum;
+    /// `relayExecutionInfo.updatedOutputAmount` is what the relayer actually
+    /// delivered — our realized-output ground truth. bytes32 address fields are
+    /// recovered with [`addr_from_bytes32`]. Decimals reuse the shared token
+    /// resolver (stables 6, WETH 18, unknown best-effort 18 — priced-or-skipped
+    /// downstream). Errors here cause the caller to skip one fill, never abort.
+    fn normalize(dest_chain: ChainId, log: &RawLog) -> Result<NormalizedIntent> {
+        let topics: Vec<B256> = log
+            .topics
+            .iter()
+            .map(|t| t.parse::<B256>())
+            .collect::<std::result::Result<_, _>>()
+            .context("unparsable log topic")?;
+        let data = alloy_primitives::hex::decode(log.data.trim())
+            .context("unparsable log data hex")?;
+        let ev = FilledRelay::decode_raw_log(topics, &data, true)
+            .map_err(|e| anyhow::anyhow!("decoding FilledRelay: {e}"))?;
+
+        let origin_chain = ChainId(
+            u64::try_from(ev.originChainId)
+                .map_err(|_| anyhow::anyhow!("originChainId {} exceeds u64", ev.originChainId))?,
+        );
+
+        let input_addr = addr_from_bytes32(ev.inputToken);
+        let output_addr = addr_from_bytes32(ev.outputToken);
+        let in_tok = TokenRef::new(origin_chain, input_addr);
+        let out_tok = TokenRef::new(dest_chain, output_addr);
+        let in_dec = known_decimals(in_tok);
+        let out_dec = known_decimals(out_tok);
+
+        let observed_at = log
+            .time_stamp()
+            .and_then(|t| DateTime::<Utc>::from_timestamp(t, 0))
+            .unwrap_or_else(Utc::now);
+        let deadline = DateTime::<Utc>::from_timestamp(ev.fillDeadline as i64, 0)
+            .unwrap_or(observed_at);
+
+        // Exclusivity: only when a designated relayer is set (nonzero word).
+        let exclusivity = {
+            let excl = addr_from_bytes32(ev.exclusiveRelayer);
+            (!excl.is_zero()).then(|| ExclusivityWindow {
+                exclusive_relayer: excl,
+                deadline: DateTime::<Utc>::from_timestamp(ev.exclusivityDeadline as i64, 0)
+                    .unwrap_or(deadline),
+            })
+        };
+
+        let id = IntentId(format!("across:{origin_chain}:{dest_chain}:{}", ev.depositId));
+        let raw = serde_json::to_value(log).unwrap_or(serde_json::Value::Null);
+
+        Ok(NormalizedIntent {
+            id,
+            source: Source::Across,
+            origin_chain,
+            dest_chain,
+            input: AssetAmount::new(in_tok, ev.inputAmount, in_dec),
+            output_min: AssetAmount::new(out_tok, ev.outputAmount, out_dec),
+            output_decay: None, // Across margin is fixed at deposit — no Dutch decay.
+            deadline,
+            settlement: SettlementType::OptimisticOracle {
+                challenge_window: Duration::seconds(ACROSS_OO_LIVENESS_SECS),
+            },
+            observed_at,
+            winning_filler: Some(addr_from_bytes32(ev.relayer)),
+            realized_output: Some(AssetAmount::new(
+                out_tok,
+                ev.relayExecutionInfo.updatedOutputAmount,
+                out_dec,
+            )),
+            exclusivity,
+            tx_ref: Some(TxRef {
+                chain: dest_chain,
+                tx_hash: log.transaction_hash.clone(),
+            }),
+            raw,
+        })
     }
 
     /// Resolve a unix `timestamp` to a block number on `chain` via
@@ -266,7 +387,7 @@ impl Envelope {
 
 /// Raw `getLogs` entry. Hex-encoded fields are parsed lazily by helpers so a
 /// single malformed field doesn't reject the whole page (rule #9 hygiene).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RawLog {
     pub topics: Vec<String>,
     pub data: String,
@@ -301,6 +422,23 @@ fn parse_hex_u64(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Address, U256};
+    use solver_types::Source;
+    use std::str::FromStr;
+
+    /// Real `FilledRelay` log captured from the verified Arbitrum SpokePool
+    /// (tx `0x234ddc0d…`) — Ethereum→Arbitrum USDT, no exclusivity. Committed
+    /// verbatim from `getLogs` so the normalize test runs on independent truth.
+    const REAL_USDT_FILL: &str = include_str!("testdata/filledrelay_arb_usdt.json");
+    /// Real exclusive fill (tx `0xd17b06bb…`) — Soneium→Arbitrum WETH with a
+    /// designated `exclusiveRelayer`. Exercises the exclusivity-present branch
+    /// and an 18-decimal asset on a different origin chain.
+    const REAL_WETH_EXCLUSIVE_FILL: &str =
+        include_str!("testdata/filledrelay_arb_weth_exclusive.json");
+
+    fn addr(s: &str) -> Address {
+        Address::from_str(s).unwrap()
+    }
 
     /// The query URL carries the audited topic0 and the right chain id — a
     /// drifted topic0 here would silently empty every pull (AE-gap). Checks
@@ -365,5 +503,85 @@ mod tests {
         assert_eq!(l.block_number(), Some(0x1c5a2244));
         assert_eq!(l.time_stamp(), Some(0x6a374e7d));
         assert_eq!(l.transaction_hash, "0x234ddc0d8ff5742f9ef05eea8b40865dd9efd42c3f0de85fb1fc70985aa887dc");
+    }
+
+    /// AX-4 ground truth: normalize a **real** Ethereum→Arbitrum USDT fill and
+    /// check every mapped field against values decoded independently with
+    /// `cast` from the on-chain log (the captured fixture). bytes32→address,
+    /// origin (from the event) vs dest (the scanned chain), realized output
+    /// (= updatedOutputAmount), winning relayer, and tx_ref all exercised.
+    #[test]
+    fn normalize_real_usdt_fill() {
+        let logs = parse_logs_envelope(REAL_USDT_FILL).unwrap();
+        let intent = AcrossIngest::normalize(ChainId::ARBITRUM, &logs[0]).unwrap();
+
+        assert_eq!(intent.source, Source::Across);
+        // origin = event.originChainId (Ethereum); dest = scanned chain.
+        assert_eq!(intent.origin_chain, ChainId::ETHEREUM);
+        assert_eq!(intent.dest_chain, ChainId::ARBITRUM);
+        assert_eq!(intent.id.0, "across:ethereum:arbitrum:4010756");
+
+        // USDT on each side → 6 decimals via the shared resolver.
+        assert_eq!(
+            intent.input.token,
+            TokenRef::new(ChainId::ETHEREUM, addr("0xdAC17F958D2ee523a2206206994597C13D831ec7"))
+        );
+        assert_eq!(intent.input.amount, U256::from(99_866_826u64));
+        assert_eq!(intent.input.decimals, 6);
+        assert_eq!(
+            intent.output_min.token,
+            TokenRef::new(ChainId::ARBITRUM, addr("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"))
+        );
+        assert_eq!(intent.output_min.amount, U256::from(99_851_885u64));
+
+        // realized = updatedOutputAmount, denominated on the dest token.
+        let realized = intent.realized_output.expect("fill has realized output");
+        assert_eq!(realized.token, intent.output_min.token);
+        assert_eq!(realized.amount, U256::from(99_851_885u64));
+
+        assert_eq!(
+            intent.winning_filler,
+            Some(addr("0xd0588c940bdbfcfb5f3e8e3c843ed1462d9f828e"))
+        );
+        assert!(intent.exclusivity.is_none(), "exclusiveRelayer is zero → no window");
+        assert!(intent.output_decay.is_none(), "Across has no Dutch decay");
+        assert_eq!(intent.deadline.timestamp(), 1_782_016_547, "fillDeadline");
+        assert_eq!(intent.observed_at.timestamp(), 1_782_009_469, "block time");
+        assert!(matches!(
+            intent.settlement,
+            SettlementType::OptimisticOracle { challenge_window } if challenge_window.num_seconds() == 1800
+        ));
+        let tx = intent.tx_ref.expect("fill carries its dest-chain tx");
+        assert_eq!(tx.chain, ChainId::ARBITRUM);
+        assert_eq!(
+            tx.tx_hash,
+            "0x234ddc0d8ff5742f9ef05eea8b40865dd9efd42c3f0de85fb1fc70985aa887dc"
+        );
+    }
+
+    /// AX-4 exclusivity branch on a real exclusive fill (Soneium→Arbitrum WETH).
+    /// A nonzero `exclusiveRelayer` must produce an [`ExclusivityWindow`] with
+    /// the relayer and `exclusivityDeadline`; the 18-decimal WETH on a
+    /// non-major origin also checks the decimals resolver beyond stables.
+    #[test]
+    fn normalize_real_exclusive_weth_fill() {
+        let logs = parse_logs_envelope(REAL_WETH_EXCLUSIVE_FILL).unwrap();
+        let intent = AcrossIngest::normalize(ChainId::ARBITRUM, &logs[0]).unwrap();
+
+        assert_eq!(intent.origin_chain, ChainId::SONEIUM); // event.originChainId = 1868
+        assert_eq!(intent.dest_chain, ChainId::ARBITRUM);
+        assert_eq!(intent.id.0, "across:soneium:arbitrum:374322");
+
+        // WETH both sides → 18 decimals.
+        assert_eq!(intent.input.decimals, 18);
+        assert_eq!(intent.output_min.decimals, 18);
+        assert_eq!(intent.input.amount, U256::from(5_929_695_444_518_610u64));
+        assert_eq!(intent.output_min.amount, U256::from(5_916_383_686_971_144u64));
+
+        let excl = intent.exclusivity.expect("nonzero exclusiveRelayer → window");
+        assert_eq!(excl.exclusive_relayer, addr("0x15652636f3898f550b257b89926d5566821c32e1"));
+        assert_eq!(excl.deadline.timestamp(), 1_782_013_962, "exclusivityDeadline");
+        // The exclusive relayer also won this fill.
+        assert_eq!(intent.winning_filler, Some(excl.exclusive_relayer));
     }
 }
