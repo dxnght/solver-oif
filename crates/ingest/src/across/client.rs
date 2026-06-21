@@ -50,7 +50,11 @@ const ETHERSCAN_LOGS_CAP: usize = 1000;
 /// coarse, source-wide constant. It is descriptive metadata on the intent and
 /// feeds no metric (no router/backtest logic reads `challenge_window`); we keep
 /// it honest rather than fabricate a per-fill number the event can't give us.
-const ACROSS_OO_LIVENESS_SECS: i64 = 1800;
+///
+/// `pub(crate)` so the live deposit path ([`crate::live`]) records the **same**
+/// settlement constant as the historical fill path — one canonical value, no
+/// drift between backtest and live.
+pub(crate) const ACROSS_OO_LIVENESS_SECS: i64 = 1800;
 
 #[derive(Debug, Clone)]
 pub struct AcrossIngestConfig {

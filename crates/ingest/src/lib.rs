@@ -18,5 +18,6 @@ pub mod store;
 pub mod uniswapx;
 
 pub use across::{AcrossIngest, AcrossIngestConfig, ACROSS_CHAINS};
+pub use live::{across_ws_var, AcrossLive, LiveSource, SourceKind};
 pub use store::JsonlSink;
 pub use uniswapx::{UniswapXIngest, UniswapXIngestConfig, UNISWAPX_CHAINS};
