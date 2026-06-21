@@ -11,6 +11,7 @@
 //! golden path. Across/live and other sources arrive in later buckets, one at
 //! a time, behind their own verification — never as a horizontal sweep.
 
+pub mod across;
 pub mod store;
 pub mod uniswapx;
 

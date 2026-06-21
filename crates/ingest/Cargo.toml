@@ -14,3 +14,4 @@ reqwest          = { workspace = true }
 chrono           = { workspace = true }
 tracing          = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-sol-types  = { workspace = true }

@@ -40,6 +40,7 @@ async-trait       = "0.1"
 futures           = "0.3"
 hex               = "0.4"
 alloy-primitives       = { version = "0.8", features = ["serde"] }
+alloy-sol-types        = { version = "0.8" }
 
 [profile.dev]
 opt-level = 0
