@@ -7,13 +7,15 @@
 //!   3. Streaming results out as JSONL (via [`store::JsonlSink`]) for the
 //!      downstream backtest to consume.
 //!
-//! Verified-core scope (bucket B0): historical UniswapX only — the no-key
-//! golden path. Across/live and other sources arrive in later buckets, one at
-//! a time, behind their own verification — never as a horizontal sweep.
+//! Verified sources (one at a time, each behind its own on-chain verification,
+//! never a horizontal sweep): historical **UniswapX** (no-key REST orders) and
+//! historical **Across** (`FilledRelay` logs via the Etherscan V2 multichain
+//! API, key-gated). Live and further sources arrive in later buckets.
 
 pub mod across;
 pub mod store;
 pub mod uniswapx;
 
+pub use across::{AcrossIngest, AcrossIngestConfig, ACROSS_CHAINS};
 pub use store::JsonlSink;
 pub use uniswapx::{UniswapXIngest, UniswapXIngestConfig, UNISWAPX_CHAINS};
