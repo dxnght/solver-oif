@@ -26,17 +26,23 @@ Exit: `doctor` показує правду; no-key цикл дає переві�
 Тримати й наповнювати даними: `would_fill_precision` + margin-drift проти realized.
 Exit: на реальному backtest видно число «з N сказаних fill, K ринок підтвердив».
 
-**B2 — Across поточне покоління подій (ловити реальний потік).**
-Across мігрував на ERC-7683 (`FundsDeposited`/`FilledRelay`, bytes32). Додати ці
-події **поряд** з V3, підписка/скан на обидва topic0. Сигнатури — з канонічного ABI
-(`@across-protocol/contracts`), **не з памʼяті**.
-Exit: live Across дає інтенти за хвилини; historical сканує обидва покоління.
+**B2 — Across historical ingest (крос-чейновий observability-шар). ✅ ЗРОБЛЕНО (AX-1..7).**
+Поточне покоління `FilledRelay` (bytes32) з канонічного ABI (`@across-protocol/contracts`),
+**не з памʼяті**; topic0 звірено з on-chain-логом; SpokePool-адреси з канонічних
+deployments (мейджори `Some`, решта `None`+PENDING). `ingest across` через Etherscan-V2
+`getLogs` пише інтенти з realized/filler/tx_ref; `doctor` дає реальну per-chain V2-готовність.
+Exit (виконано): backtest включає Across, would_fill-калібрування рахується крос-чейн.
+Свідомо **поза** скоупом (окремі buckets): deposits-скан + JOIN depozit↔fill (PATH);
+старе покоління `FilledV3Relay`; live-WS.
 
-**B3 — Live gas/prices (вивести would_fill із шумової смуги).**
+**B3 — Live gas/prices (вивести would_fill із шумової смуги). НАСТУПНЕ.**
 `eth_feeHistory`-газ по чейну + live ETH/BTC, **за прапорцем**, fallback static,
 дефолт off (детермінізм CI). Калібрувати `clearing_delay` з даних, не з руки.
 
-**Тільки після B0–B3 — повертатись до нової ширини** (FEED/PATH/OIF/нові чейни).
+**B4 — Live Across shadow.** WS-адаптер на поточний `FilledRelay`, нуль транзакцій;
+реюз нормалайзера B2 (один `FillPolicy` у live і backtest).
+
+**Тільки після B0–B4 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
 

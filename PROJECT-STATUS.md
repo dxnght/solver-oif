@@ -22,7 +22,7 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
 
 ## Що працює (B0 verified core — реалізовано й перевірено наскрізно)
 Чистий рестарт пройшов наскрізний no-key цикл `ingest uniswapx → backtest → звіт`:
-- **6-крейтова основа зелена**: `build + clippy -D warnings + test` (44 тести,
+- **6-крейтова основа зелена**: `build + clippy -D warnings + test` (61 тест,
   поведінкові/property, не тавтологічні). Компілятор — істина.
 - **RouterV0** — `NormalizedIntent → Quote/Skip`: економіка філлера в USD,
   asset-class confidence, Dutch-decay, `QuoteOutcome`/`SkipReason`.
@@ -37,7 +37,15 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
   усереднений.
 - **Verify-links** — `TxRef` → block-explorer; лише верифіковані домени, `None`/`—` для
   невідомих. У звіті кожен fill несе клікабельний tx-лінк.
-- **`solver doctor`** — read-only preflight без мережі: каже, що дасть дані до прогону.
+- **`solver doctor`** — read-only preflight: статика без мережі + **реальна Etherscan-V2
+  per-chain проба** для Across (DATA-OK / NO-V2 / NEEDS-KEY), каже, що дасть дані до прогону.
+- **Across historical ingest (B2)** — крос-чейновий observability-шар: поточне покоління
+  `FilledRelay` (bytes32) з канонічного `@across-protocol/contracts`-ABI; topic0 звірено
+  з реальним on-chain-логом; SpokePool-адреси з канонічних deployments (5 мейджорів `Some`,
+  решта `None`+PENDING). `ingest across` пише інтенти з наповненими
+  `realized_output`/`winning_filler`/`tx_ref`; backtest тепер рахує **would_fill-калібрування
+  крос-чейн** (drift ≈ похибка static-входів — очікувано, бо маржа фіксована депозитом, без
+  Dutch-аукціону). Free Etherscan-ключ покриває не всі чейни — `doctor` каже це гучно.
 
 **Емпіричний урок (записано в spec §0):** на static-цінах would_fill на **волатильних**
 маршрутах давав фантомний edge ($1.18M «прибутку», 94% «precision») — артефакт
@@ -49,9 +57,9 @@ static-ціни (та ще й тавтологічної: модель і realiz
 - 🔴 **OIF InputSettler-адреса хардкоднута й НЕВЕРИФІКОВАНА** (`live/oif/deployments.rs`):
   коментар посилається на `DEPLOYMENTS.md`, якого в репо OIF немає; «тест» —
   тавтологія. **Не довіряти, поки не звірено on-chain.** Тримати OIF idle.
-- 🟠 **Across-події застаріли на покоління**: адаптери лише `V3FundsDeposited`/
-  `FilledV3Relay`; Across мігрував на `FundsDeposited`/`FilledRelay` (bytes32). Live
-  може бути сліпий до частини потоку → bucket B2.
+- ✅ **Across-події (історичні) на поточному поколінні** — закрито в B2: ingest читає
+  `FilledRelay` (bytes32) з канонічного ABI. Лишається: live-WS-адаптер (B4) і JOIN
+  depozit↔fill (PATH, окремий bucket) — обидва ще на старому/відсутньому шляху.
 - 🟡 **Дрейф ширини**: додано FEED/PATH/OIF замість консолідації (doctor/B2). Заморозити.
 - **Компіляція не підтверджена незалежним аудитом** (потрібні build/test-логи).
 
@@ -60,11 +68,12 @@ static-ціни (та ще й тавтологічної: модель і realiz
 2. ✅ **B1 — would_fill-калібрування поглиблене**: net↔net margin-drift + розподіл,
    дві precision, per-route summary, top-10 worst-drift — **зроблено** (WFC-5..8).
    (`dest_summary` — окремо, за потреби.)
-3. **B2 (наступне)** — поточні Across-події + Etherscan-V2 проба в `doctor` (відкладена з B0:
-   немає Across-шляху, що споживає V2 block-times — не будувати передчасну ширину).
-4. **B3** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз навмисно
-   нижче порога на static-цінах).
-5. Тільки тоді — нова ширина (FEED/PATH/OIF після on-chain-підтвердження адреси).
+3. ✅ **B2 — Across historical ingest + Etherscan-V2 проба в `doctor`**: поточне покоління
+   `FilledRelay`, калібрування побігло крос-чейн — **зроблено** (AX-1..7).
+4. **B3 (наступне)** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз
+   навмисно нижче порога на static-цінах).
+5. **B4** — live Across shadow (WS-адаптер на `FilledRelay`, нуль транзакцій).
+6. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.
