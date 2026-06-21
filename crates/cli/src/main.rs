@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
         Command::Backtest { out_dir } => run_backtest(&out_dir).await,
         Command::Doctor { suggest } => {
-            run_doctor(suggest);
+            run_doctor(suggest).await;
             Ok(())
         }
     }
@@ -149,12 +149,45 @@ async fn run_backtest(out_dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_doctor(suggest_only: bool) {
+/// Etherscan V2 multichain base for the doctor probe (matches the ingest
+/// client's default). Kept here so doctor needs no ingest-internal access.
+const ETHERSCAN_V2_BASE: &str = "https://api.etherscan.io/v2";
+
+async fn run_doctor(suggest_only: bool) {
     if suggest_only {
         println!("{}", doctor::SUGGEST_NO_KEY);
         return;
     }
     let lookup = doctor::process_env();
-    let report = doctor::gather(&doctor::Env { lookup: &lookup });
+    let mut report = doctor::gather(&doctor::Env { lookup: &lookup });
+
+    // Live per-chain Across V2 readiness. With a key we issue one
+    // getblocknobytime per chain (the free key silently covers only some);
+    // without a key we probe nothing and every chain reports NEEDS-KEY.
+    let key = std::env::var("ETHERSCAN_API_KEY").ok().filter(|k| !k.trim().is_empty());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let http = reqwest::Client::new();
+    let probes = doctor::probe_across(key.is_some(), |chain| {
+        let http = http.clone();
+        let key = key.clone();
+        async move {
+            let key = key.unwrap_or_default(); // only reached when key.is_some()
+            let url = format!(
+                "{ETHERSCAN_V2_BASE}/api?chainid={}&module=block&action=getblocknobytime\
+                 &timestamp={now}&closest=before&apikey={key}",
+                chain.0,
+            );
+            let body = http.get(&url).send().await?.text().await?;
+            // Stay well under the free tier's rate cap between chains.
+            tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+            Ok(body)
+        }
+    })
+    .await;
+    report.across_probe = Some(probes);
+
     print!("{}", doctor::render(&report));
 }
