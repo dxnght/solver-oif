@@ -9,11 +9,13 @@
 //! subset of chains, and finding that out at ingest time is exactly the kind
 //! of quiet failure rule #7 forbids.
 //!
-//! Honest scope: historical **UniswapX** (HTTP, no key) and historical
-//! **Across** (`FilledRelay` via Etherscan V2, key-gated) are wired. Live
-//! Across (WS) is a later bucket — the `ACROSS_WS_*` env is reported but
-//! nothing subscribes yet. **OIF stays idle**: its settler address is
-//! UNVERIFIED and must be confirmed on-chain before we trust or probe it.
+//! Honest scope: historical **UniswapX** (HTTP, no key), historical **Across**
+//! (`FilledRelay` via Etherscan V2, key-gated), and live **Across** (WS deposit
+//! subscription, B4) are wired. Doctor now reports both historical (V2) and
+//! live (WS) per-chain readiness: a live chain is ready when its
+//! `ACROSS_WS_<CHAIN>` is set **and** we hold a verified SpokePool for it.
+//! **OIF stays idle**: its settler address is UNVERIFIED and must be confirmed
+//! on-chain before we trust or probe it.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -22,8 +24,10 @@ use solver_ingest::across::spoke_pool;
 use solver_ingest::{ACROSS_CHAINS, UNISWAPX_CHAINS};
 use solver_types::ChainId;
 
-/// Chains we'd watch for live Across once the WS adapter lands. Used only to
-/// report `ACROSS_WS_<CHAIN>` env presence today — nothing subscribes yet.
+/// Chains the live Across adapter (B4) subscribes to when their
+/// `ACROSS_WS_<CHAIN>` is set. Matches the `solver live --chains
+/// base,arbitrum,optimism` golden path; doctor reports per-chain WS readiness
+/// for exactly this set.
 const ACROSS_LIVE_CHAINS: &[ChainId] = &[ChainId::BASE, ChainId::ARBITRUM, ChainId::OPTIMISM];
 
 /// The minimal command that produces a verifiable result with no API key.
@@ -107,6 +111,18 @@ impl DoctorReport {
         self.across_probe
             .as_ref()
             .map(|p| (p.iter().filter(|c| c.status.is_data()).count(), p.len()))
+    }
+
+    /// How many live chains are WS-ready (`ACROSS_WS_<CHAIN>` set **and** a
+    /// verified SpokePool), out of the configured live set. A static check (no
+    /// network) — env presence + the SpokePool table.
+    pub fn across_ws_ratio(&self) -> (usize, usize) {
+        let ready = self
+            .across_ws_env
+            .iter()
+            .filter(|(c, present)| *present && spoke_pool(*c).is_some())
+            .count();
+        (ready, self.across_ws_env.len())
     }
 }
 
@@ -225,10 +241,16 @@ pub fn render(r: &DoctorReport) -> String {
             .collect();
         if set.is_empty() { "no ACROSS_WS_*".to_string() } else { set.join(",") }
     };
+    let (ws_ready, ws_total) = r.across_ws_ratio();
+    let ws_status = if ws_ready > 0 {
+        format!("READY on {ws_ready}/{ws_total} chains (WS)")
+    } else {
+        "IDLE (no ACROSS_WS_*)".to_string()
+    };
     let _ = writeln!(
         s,
-        "across (live)       live        {:<19}  IDLE (WS adapter pending B4)",
-        across_ws_summary
+        "across (live)       live        {:<19}  {}",
+        across_ws_summary, ws_status,
     );
     let _ = writeln!(
         s,
@@ -259,15 +281,33 @@ pub fn render(r: &DoctorReport) -> String {
         let _ = writeln!(s);
     }
 
+    // Per-chain live WS readiness (LIV-5): ACROSS_WS_<CHAIN> presence + spoke.
+    if !r.across_ws_env.is_empty() {
+        let _ = writeln!(s, "Across live — per-chain WS readiness (ACROSS_WS_<CHAIN>):");
+        for (c, present) in &r.across_ws_env {
+            let _ = writeln!(
+                s,
+                "  {:<10}  {:<10}  spoke {}",
+                c.name(),
+                if *present { "WS-SET" } else { "WS-MISSING" },
+                if spoke_pool(*c).is_some() { "✓" } else { "✗ PENDING" },
+            );
+        }
+        let (n, m) = r.across_ws_ratio();
+        let _ = writeln!(s, "  → Live Across will subscribe on {n}/{m} configured chains.");
+        let _ = writeln!(s);
+    }
+
     // One-line legibility summary.
     let across_line = match (r.etherscan_key_present, r.across_data_ratio()) {
         (true, Some((n, m))) => format!("across=historical {n}/{m} chains"),
         _ => "across=needs-key".to_string(),
     };
+    let (ws_n, ws_m) = r.across_ws_ratio();
     let _ = writeln!(
         s,
         "Historical: uniswapx ready on {} chains (no key), {across_line}. \
-         Live: across-ws=idle(B4), oif=idle(unverified).",
+         Live: across-ws={ws_n}/{ws_m} set, oif=idle(unverified).",
         r.uniswapx_chains.len()
     );
 
@@ -377,8 +417,28 @@ mod tests {
         assert!(out.contains("oif"));
         assert!(out.contains("UNVERIFIED"));
         assert!(out.contains("across=needs-key"));
-        assert!(out.contains("WS adapter pending B4"));
+        // Empty env → live Across is idle, every live chain WS-MISSING.
+        assert!(out.contains("IDLE (no ACROSS_WS_*)"));
+        assert!(out.contains("WS-MISSING"));
+        assert!(out.contains("across-ws=0/3 set"));
         assert!(out.contains(SUGGEST_NO_KEY));
+    }
+
+    /// LIV-5: with one `ACROSS_WS_<CHAIN>` set, doctor reports per-chain WS
+    /// readiness (WS-SET vs WS-MISSING) and the live ratio — so a half-configured
+    /// live run is legible *before* it starts, not a silent partial subscribe.
+    #[test]
+    fn render_shows_live_ws_readiness() {
+        let lookup = env_from(HashMap::from([("ACROSS_WS_BASE", "wss://x")]));
+        let r = gather(&Env { lookup: &lookup });
+        assert_eq!(r.across_ws_ratio(), (1, 3));
+        let out = render(&r);
+        assert!(out.contains("per-chain WS readiness"));
+        assert!(out.contains("WS-SET"), "base is set");
+        assert!(out.contains("WS-MISSING"), "arbitrum/optimism unset");
+        assert!(out.contains("READY on 1/3 chains (WS)"));
+        assert!(out.contains("Live Across will subscribe on 1/3 configured chains."));
+        assert!(out.contains("across-ws=1/3 set"));
     }
 
     /// If no source would produce data, the top line is a loud ✗.

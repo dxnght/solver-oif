@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use solver_types::NormalizedIntent;
+use serde::Serialize;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::info;
 
-/// Append-only JSONL writer. One line per [`NormalizedIntent`].
+/// Append-only JSONL writer. One line per serialized record (a
+/// `NormalizedIntent` from ingest, or a live `DecisionRecord`).
 ///
 /// Chosen over Parquet/SQLite because:
 ///   - dead-simple to inspect with `jq` / `head`
@@ -41,10 +42,12 @@ impl JsonlSink {
         })
     }
 
-    pub async fn write(&mut self, intent: &NormalizedIntent) -> Result<()> {
-        let mut line = serde_json::to_vec(intent).context("serializing intent")?;
+    /// Append one record as a JSON line. Generic over `T: Serialize` so the same
+    /// sink serves historical intents and the live decisions log (LIV-4).
+    pub async fn write<T: Serialize>(&mut self, record: &T) -> Result<()> {
+        let mut line = serde_json::to_vec(record).context("serializing record")?;
         line.push(b'\n');
-        self.writer.write_all(&line).await.context("writing intent line")?;
+        self.writer.write_all(&line).await.context("writing record line")?;
         self.written += 1;
         Ok(())
     }

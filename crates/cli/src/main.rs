@@ -7,11 +7,13 @@
 //! silently (legibility is first-class — `CLAUDE.md` §7).
 
 mod doctor;
+mod live;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use solver_ingest::{AcrossIngest, AcrossIngestConfig, UniswapXIngest, UniswapXIngestConfig};
+use solver_types::ChainId;
 
 /// Default on-disk locations per source.
 const UNISWAPX_DATA_DIR: &str = "data/uniswapx";
@@ -41,6 +43,22 @@ enum Command {
         #[arg(long, default_value = "reports/run")]
         out_dir: String,
     },
+    /// Phase-1 live shadow: subscribe to real-time intents and log shadow
+    /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` per chain.
+    Live {
+        /// Comma-separated origin chains, e.g. `base,arbitrum,optimism`.
+        #[arg(long)]
+        chains: String,
+        /// Comma-separated sources. Only `across` is wired; `oif` stays idle.
+        #[arg(long, default_value = "across")]
+        sources: String,
+        /// Stop after N seconds (omit to run until interrupted).
+        #[arg(long)]
+        duration: Option<u64>,
+        /// Output directory for the decisions JSONL.
+        #[arg(long, default_value = live::LIVE_OUT_DIR)]
+        out: String,
+    },
     /// Preflight: print what is configured and which chains/sources will
     /// actually produce data, before any run.
     Doctor {
@@ -48,6 +66,25 @@ enum Command {
         #[arg(long)]
         suggest: bool,
     },
+}
+
+/// Parse a comma-separated chain list (`base,arbitrum,…`) into [`ChainId`]s,
+/// erroring loudly on an unknown name (legibility — never a silent drop).
+fn parse_chains(s: &str) -> anyhow::Result<Vec<ChainId>> {
+    let mut out = Vec::new();
+    for name in s.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let c = ChainId::from_name(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown chain '{name}'. Known examples: base, arbitrum, optimism, \
+                 ethereum, polygon."
+            )
+        })?;
+        out.push(c);
+    }
+    if out.is_empty() {
+        anyhow::bail!("no chains given; pass e.g. --chains base,arbitrum,optimism");
+    }
+    Ok(out)
 }
 
 #[tokio::main]
@@ -64,6 +101,15 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
         Command::Backtest { out_dir } => run_backtest(&out_dir).await,
+        Command::Live { chains, sources, duration, out } => {
+            let chains = parse_chains(&chains)?;
+            let sources: Vec<String> = sources
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            live::run(chains, sources, duration, &out).await
+        }
         Command::Doctor { suggest } => {
             run_doctor(suggest).await;
             Ok(())

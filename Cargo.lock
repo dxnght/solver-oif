@@ -2426,6 +2426,7 @@ name = "solver-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "reqwest",
  "serde",

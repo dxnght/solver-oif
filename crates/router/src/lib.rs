@@ -30,8 +30,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use solver_pricing::GasModel;
 use solver_types::{
-    asset_class, AssetAmount, AssetClass, ChainId, DutchDecay, NormalizedIntent, Quote, Route,
-    RouteHop, RouteSource, SignedAmount, TokenRef,
+    asset_class, AssetAmount, AssetClass, ChainId, DutchDecay, FillPolicy, FillReason,
+    NormalizedIntent, Quote, Route, RouteHop, RouteSource, SignedAmount, TokenRef,
 };
 
 /// Confidence in a same-class route (stable→stable): both legs are valued at
@@ -179,6 +179,60 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
             confidence,
             valid_until: intent.deadline,
         }))
+    }
+
+    /// Quote `intent` as of `eval_at` **and** apply `policy` — the single place
+    /// `router.quote` and `policy.evaluate` are combined. Both the backtest
+    /// aggregator and the live shadow loop call this, so `would_fill` and the
+    /// `reason` string mean exactly one thing everywhere (the FP-1 invariant;
+    /// CLAUDE.md §would_fill — "live і backtest зобов'язані давати однакову
+    /// відповідь"). Do not re-derive the decision anywhere else.
+    pub async fn decide(
+        &self,
+        intent: &NormalizedIntent,
+        eval_at: DateTime<Utc>,
+        policy: &FillPolicy,
+    ) -> Decision {
+        let outcome = self.quote(intent, eval_at).await;
+        // A skip has no policy verdict (its reason IS the SkipReason); a quote
+        // always yields one.
+        let verdict = outcome.quote().map(|q| policy.evaluate(q));
+        Decision { outcome, verdict }
+    }
+}
+
+/// One intent's full decision: the router [`QuoteOutcome`] plus, when quoted,
+/// the [`FillPolicy`] verdict. Produced only by [`RouterV0::decide`] so backtest
+/// and live share identical logic.
+#[derive(Debug, Clone)]
+pub struct Decision {
+    pub outcome: QuoteOutcome,
+    /// `(would_fill, reason)` from the policy — `Some` iff `outcome` is
+    /// `Quoted`. A skip carries its reason in the `SkipReason` instead.
+    pub verdict: Option<(bool, FillReason)>,
+}
+
+impl Decision {
+    /// The priced quote, when the intent was quoted (else `None` — a skip).
+    pub fn quote(&self) -> Option<&Quote> {
+        self.outcome.quote()
+    }
+
+    /// Whether we would bid. `false` for any skip.
+    pub fn would_fill(&self) -> bool {
+        matches!(self.verdict, Some((true, _)))
+    }
+
+    /// The single stable reason string for the decisions log: the `SkipReason`
+    /// when skipped, otherwise the `FillReason`. Both come from `as_str()` — no
+    /// new strings invented (CLAUDE.md discipline).
+    pub fn reason(&self) -> &'static str {
+        match (&self.outcome, &self.verdict) {
+            (QuoteOutcome::Skipped(r), _) => r.as_str(),
+            (QuoteOutcome::Quoted(_), Some((_, fr))) => fr.as_str(),
+            // A quote always carries a verdict; stay total without panicking.
+            (QuoteOutcome::Quoted(_), None) => FillReason::Suspect.as_str(),
+        }
     }
 }
 
@@ -360,6 +414,32 @@ mod tests {
             QuoteOutcome::Skipped(SkipReason::Expired) => {}
             other => panic!("expected Expired, got {other:?}"),
         }
+    }
+
+    /// The shared `decide` helper must equal quote-then-evaluate (the FP-1
+    /// invariant: one decision, used by both backtest and live). Checked on the
+    /// quoted path (would_fill + reason + profit) AND a skip path (reason is the
+    /// SkipReason string, no quote) — so the decisions log can't diverge from
+    /// the backtest.
+    #[tokio::test]
+    async fn decide_matches_quote_then_evaluate() {
+        let policy = FillPolicy::default();
+        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+
+        // Quoted path: helper agrees with the manual quote+evaluate.
+        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
+        let (fill, reason) = policy.evaluate(&q);
+        let d = router().decide(&i, i.observed_at, &policy).await;
+        assert_eq!(d.would_fill(), fill);
+        assert_eq!(d.reason(), reason.as_str());
+        assert_eq!(d.quote().unwrap().expected_profit_usd, q.expected_profit_usd);
+
+        // Skip path: reason is the SkipReason, would_fill false, no quote.
+        let after = i.deadline + Duration::seconds(1);
+        let d2 = router().decide(&i, after, &policy).await;
+        assert!(!d2.would_fill());
+        assert_eq!(d2.reason(), "expired");
+        assert!(d2.quote().is_none());
     }
 
     /// Same route, expensive vs cheap gas chain: Ethereum's ~$27 fill gas eats

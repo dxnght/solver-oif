@@ -197,7 +197,10 @@ pub async fn compute(
             .map(|d| d.start_time)
             .unwrap_or(intent.observed_at);
 
-        match router.quote(intent, eval_at).await {
+        // Single shared decision (router.quote + policy.evaluate) — identical
+        // to what the live shadow loop runs, so would_fill means one thing.
+        let decision = router.decide(intent, eval_at, &policy).await;
+        match &decision.outcome {
             QuoteOutcome::Skipped(r) => {
                 *m.skipped.entry(r.as_str().to_string()).or_default() += 1;
             }
@@ -206,7 +209,7 @@ pub async fn compute(
                 if q.expected_profit_usd > 0.0 {
                     m.profitable_quotes += 1;
                 }
-                let (fill, reason) = policy.evaluate(&q);
+                let (fill, reason) = decision.verdict.expect("a quote always has a verdict");
                 *m.fill_reasons.entry(reason.as_str().to_string()).or_default() += 1;
 
                 if fill {
