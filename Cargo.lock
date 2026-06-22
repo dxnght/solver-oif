@@ -2425,6 +2425,7 @@ dependencies = [
 name = "solver-cli"
 version = "0.0.1"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "chrono",
  "clap",

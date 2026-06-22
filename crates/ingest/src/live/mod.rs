@@ -366,4 +366,38 @@ mod tests {
         // fillDeadline (0x6a37cb4f) → the intent deadline.
         assert_eq!(intent.deadline.timestamp(), 0x6a37cb4f);
     }
+
+    /// LIV-6: the exclusivity-**present** branch of `normalize_deposit`. The
+    /// clean real fixture has a zero `exclusiveRelayer`; here we synthesize the
+    /// exclusivity case by setting the two words the fixture left empty —
+    /// `exclusivityDeadline` (data word 6) and `exclusiveRelayer` (word 8),
+    /// with a real Across exclusive-relayer address. A clearly synthetic variant
+    /// of the real log (NOT presented as on-chain), exercising the same branch
+    /// the historical exclusive-fill test covers for the fill side.
+    #[test]
+    fn normalize_deposit_exclusivity_branch() {
+        let mut log = real_deposit_log();
+        let mut data = alloy_primitives::hex::decode(log.data.trim()).unwrap();
+        // Non-indexed word layout: 0 inputToken, 1 outputToken, 2 inputAmount,
+        // 3 outputAmount, 4 quoteTimestamp, 5 fillDeadline, 6 exclusivityDeadline,
+        // 7 recipient, 8 exclusiveRelayer, 9 msg-offset, 10 msg-len.
+        let set_tail = |data: &mut [u8], word: usize, val: &[u8]| {
+            let end = (word + 1) * 32;
+            data[end - val.len()..end].copy_from_slice(val);
+        };
+        // exclusivityDeadline between quoteTimestamp and fillDeadline.
+        set_tail(&mut data, 6, &0x6a37_b000u32.to_be_bytes());
+        let relayer =
+            alloy_primitives::hex::decode("15652636f3898f550b257b89926d5566821c32e1").unwrap();
+        set_tail(&mut data, 8, &relayer); // low 20 bytes of word 8
+        log.data = format!("0x{}", alloy_primitives::hex::encode(&data));
+
+        let intent = normalize_deposit(ChainId::ARBITRUM, &log).unwrap();
+        let excl = intent.exclusivity.expect("nonzero exclusiveRelayer → window");
+        assert_eq!(
+            excl.exclusive_relayer,
+            "0x15652636f3898f550b257b89926d5566821c32e1".parse::<Address>().unwrap()
+        );
+        assert_eq!(excl.deadline.timestamp(), 0x6a37_b000);
+    }
 }

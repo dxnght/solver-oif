@@ -186,3 +186,127 @@ pub async fn run(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{address, Address, U256};
+    use chrono::Duration;
+    use solver_pricing::StaticGasModel;
+    use solver_router::RouterV0;
+    use solver_types::{AssetAmount, IntentId, SettlementType, Source, TokenRef, TxRef};
+
+    const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+    const ARB_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
+    // 64-hex tx, set on the ORIGIN chain (deposit) like a live Across intent.
+    const TX: &str = "0xabc0000000000000000000000000000000000000000000000000000000000001";
+
+    /// A stable Base→Arbitrum intent (origin tx_ref), the shape a live Across
+    /// deposit takes once normalized. `out_units < in_units` → fillable.
+    fn stable_intent(id: &str, in_units: u64, out_units: u64) -> NormalizedIntent {
+        let now = Utc::now();
+        let in_tok = TokenRef::new(ChainId::BASE, BASE_USDC);
+        let out_tok = TokenRef::new(ChainId::ARBITRUM, ARB_USDC);
+        NormalizedIntent {
+            id: IntentId(id.into()),
+            source: Source::Across,
+            origin_chain: ChainId::BASE,
+            dest_chain: ChainId::ARBITRUM,
+            input: AssetAmount::new(in_tok, U256::from(in_units), 6),
+            output_min: AssetAmount::new(out_tok, U256::from(out_units), 6),
+            output_decay: None,
+            deadline: now + Duration::minutes(5),
+            settlement: SettlementType::OptimisticOracle {
+                challenge_window: Duration::seconds(1800),
+            },
+            observed_at: now,
+            winning_filler: None,
+            realized_output: None,
+            exclusivity: None,
+            tx_ref: Some(TxRef { chain: ChainId::BASE, tx_hash: TX.into() }),
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    /// FP-1 proof-by-execution: drive the SAME intent through both real code
+    /// paths — `backtest::compute` and the live `decide` + `DecisionRecord` —
+    /// and assert identical `would_fill` AND `reason`. Catches a regression
+    /// where either path stops using the shared `decide()` (the old live
+    /// `>$0.50` vs backtest `>$0` split). One fillable intent, one underwater.
+    #[tokio::test]
+    async fn live_decision_matches_backtest() {
+        let policy = FillPolicy::default();
+        let cases = [
+            stable_intent("across:base:arbitrum:1", 1_000_000_000, 990_000_000), // fill
+            stable_intent("across:base:arbitrum:2", 1_000_000_000, 1_005_000_000), // underwater
+        ];
+        for intent in &cases {
+            // Backtest path (its real aggregator).
+            let bt = solver_backtest::compute(
+                std::slice::from_ref(intent),
+                StaticPriceFeed::reference(),
+                policy,
+            )
+            .await;
+            let bt_would_fill = bt.metrics.would_fill == 1;
+            let bt_reason = bt
+                .metrics
+                .fill_reasons
+                .keys()
+                .next()
+                .or_else(|| bt.metrics.skipped.keys().next())
+                .expect("exactly one decision for one intent")
+                .clone();
+
+            // Live path (same eval_at; static prices/gas → deterministic).
+            let router = RouterV0::new(StaticPriceFeed::reference(), StaticGasModel);
+            let eval_at = intent.observed_at;
+            let decision = router.decide(intent, eval_at, &policy).await;
+            let rec = DecisionRecord::from_decision(intent, eval_at, &decision);
+
+            assert_eq!(rec.would_fill, bt_would_fill, "would_fill diverged for {}", rec.intent_id);
+            assert_eq!(rec.reason, bt_reason, "reason diverged for {}", rec.intent_id);
+        }
+    }
+
+    /// LIV-6 / exit-criteria: a DecisionRecord row carries the durable shape the
+    /// decisions JSONL promises — `retrospective:false`, a `verify_url` on the
+    /// backing (origin) tx, a stable `reason` string, quoted ⇒ numbers present —
+    /// and round-trips through serde (additive JSONL, add fields never rename).
+    #[tokio::test]
+    async fn decision_record_shape_and_roundtrip() {
+        let policy = FillPolicy::default();
+        let intent = stable_intent("across:base:arbitrum:9", 1_000_000_000, 990_000_000);
+        let router = RouterV0::new(StaticPriceFeed::reference(), StaticGasModel);
+        let eval_at = intent.observed_at;
+        let decision = router.decide(&intent, eval_at, &policy).await;
+        let rec = DecisionRecord::from_decision(&intent, eval_at, &decision);
+
+        assert!(!rec.retrospective, "live rows are real-time, not retrospective");
+        // verify_url points at the backing tx on its chain (origin deposit).
+        assert_eq!(rec.verify_url, Some(format!("https://basescan.org/tx/{TX}")));
+        // reason is one of the stable Skip/FillReason strings — never a new one.
+        const STABLE: &[&str] = &[
+            "fill", "suspect", "unprofitable", "below_margin", "price_unknown", "expired",
+            "exclusive_to_other", "dust_amount",
+        ];
+        assert!(STABLE.contains(&rec.reason.as_str()), "non-stable reason {}", rec.reason);
+        // This stable route quotes → all three quote numbers present together.
+        assert!(
+            rec.expected_profit_usd.is_some()
+                && rec.confidence.is_some()
+                && rec.gas_usd.is_some(),
+            "quoted ⇒ numbers present"
+        );
+
+        // Durable JSONL: serialize → deserialize → identical key fields.
+        let line = serde_json::to_string(&rec).unwrap();
+        let back: DecisionRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.intent_id, rec.intent_id);
+        assert_eq!(back.would_fill, rec.would_fill);
+        assert_eq!(back.reason, rec.reason);
+        assert_eq!(back.retrospective, rec.retrospective);
+        assert_eq!(back.verify_url, rec.verify_url);
+        assert_eq!(back.expected_profit_usd, rec.expected_profit_usd);
+    }
+}
