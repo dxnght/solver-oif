@@ -88,15 +88,42 @@ pub struct ChainProbe {
     pub has_spoke_pool: bool,
 }
 
+/// CoinGecko reachability for live pricing (`--live-prices`). A single
+/// lightweight `/ping`; like the Across probe, the `fetch` is injected so the
+/// CLI hits the network while tests pass a canned body (no network in CI).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoinGeckoStatus {
+    /// `/ping` answered with the expected `gecko_says` body.
+    Reachable,
+    /// Unreachable or an unexpected body — live pricing would fall back to the
+    /// static feed (carries the reason).
+    Error(String),
+}
+
+impl CoinGeckoStatus {
+    pub fn label(&self) -> &str {
+        match self {
+            CoinGeckoStatus::Reachable => "REACHABLE",
+            CoinGeckoStatus::Error(_) => "ERROR",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DoctorReport {
     pub etherscan_key_present: bool,
     pub uniswapx_chains: Vec<ChainId>,
-    /// (chain, `ACROSS_WS_<CHAIN>` present) — for the future live adapter.
+    /// (chain, `ACROSS_WS_<CHAIN>` present) — the live deposit subscription.
     pub across_ws_env: Vec<(ChainId, bool)>,
+    /// (chain, `ACROSS_RPC_<CHAIN>` present) — the live-gas `eth_feeHistory`
+    /// endpoint. A chain without one still works (static gas fallback); this
+    /// just reports whether the LIVE gas number is available there.
+    pub across_rpc_env: Vec<(ChainId, bool)>,
     /// Per-chain Across V2 readiness. `None` until the probe runs (e.g. the
     /// pure render tests); the CLI always populates it.
     pub across_probe: Option<Vec<ChainProbe>>,
+    /// CoinGecko reachability for `--live-prices`. `None` until probed.
+    pub coingecko: Option<CoinGeckoStatus>,
 }
 
 impl DoctorReport {
@@ -124,6 +151,13 @@ impl DoctorReport {
             .count();
         (ready, self.across_ws_env.len())
     }
+
+    /// How many live chains have an `ACROSS_RPC_<CHAIN>` set for live gas, out
+    /// of the configured live set. Static env check (no network).
+    pub fn across_rpc_ratio(&self) -> (usize, usize) {
+        let set = self.across_rpc_env.iter().filter(|(_, present)| *present).count();
+        (set, self.across_rpc_env.len())
+    }
 }
 
 /// Gather the static report from the environment. Pure given `env`; no I/O.
@@ -133,11 +167,17 @@ pub fn gather(env: &Env) -> DoctorReport {
         .iter()
         .map(|c| (*c, env.present(&format!("ACROSS_WS_{}", c.name().to_uppercase()))))
         .collect();
+    let across_rpc_env = ACROSS_LIVE_CHAINS
+        .iter()
+        .map(|c| (*c, env.present(&format!("ACROSS_RPC_{}", c.name().to_uppercase()))))
+        .collect();
     DoctorReport {
         etherscan_key_present: env.present("ETHERSCAN_API_KEY"),
         uniswapx_chains: UNISWAPX_CHAINS.to_vec(),
         across_ws_env,
+        across_rpc_env,
         across_probe: None,
+        coingecko: None,
     }
 }
 
@@ -193,6 +233,31 @@ where
         out.push(ChainProbe { chain, status, has_spoke_pool });
     }
     out
+}
+
+/// Classify a CoinGecko `/ping` body. The live API answers
+/// `{"gecko_says":"(V3) To the Moon!"}`; anything else means live pricing would
+/// fall back to static. Pure — the network is the caller's concern.
+pub fn classify_coingecko(body: &str) -> CoinGeckoStatus {
+    if body.contains("gecko_says") {
+        CoinGeckoStatus::Reachable
+    } else {
+        CoinGeckoStatus::Error(format!("unexpected /ping response: {body}"))
+    }
+}
+
+/// Probe CoinGecko reachability via an injected `fetch` (a real GET in the CLI,
+/// a canned body in tests). A fetch error is itself an `Error` status — live
+/// pricing degrades to static, which doctor must say *before* a run (rule #7).
+pub async fn probe_coingecko<F, Fut>(fetch: F) -> CoinGeckoStatus
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<String>>,
+{
+    match fetch().await {
+        Ok(body) => classify_coingecko(&body),
+        Err(e) => CoinGeckoStatus::Error(e.to_string()),
+    }
 }
 
 /// Render the human report. Pure (string out) so it's snapshot-testable.
@@ -298,6 +363,32 @@ pub fn render(r: &DoctorReport) -> String {
         let _ = writeln!(s);
     }
 
+    // Live pricing readiness (LP-5): CoinGecko reachability (--live-prices) and
+    // per-chain ACROSS_RPC presence (--live-gas). Both degrade to static, so a
+    // run is legible about whether the LIVE numbers will actually be available.
+    if r.coingecko.is_some() || !r.across_rpc_env.is_empty() {
+        let _ = writeln!(s, "Live pricing — readiness (--live-prices / --live-gas):");
+        if let Some(cg) = &r.coingecko {
+            let note = match cg {
+                CoinGeckoStatus::Error(e) => format!("  ({e})"),
+                CoinGeckoStatus::Reachable => String::new(),
+            };
+            let _ = writeln!(s, "  coingecko   {:<10}  --live-prices source{}", cg.label(), note);
+        }
+        for (c, present) in &r.across_rpc_env {
+            let _ = writeln!(
+                s,
+                "  {:<10}  {:<10}  live gas via ACROSS_RPC_{}",
+                c.name(),
+                if *present { "RPC-SET" } else { "RPC-MISSING" },
+                c.name().to_uppercase(),
+            );
+        }
+        let (n, m) = r.across_rpc_ratio();
+        let _ = writeln!(s, "  → Live gas on {n}/{m} configured chains (others use static gas).");
+        let _ = writeln!(s);
+    }
+
     // One-line legibility summary.
     let across_line = match (r.etherscan_key_present, r.across_data_ratio()) {
         (true, Some((n, m))) => format!("across=historical {n}/{m} chains"),
@@ -310,6 +401,13 @@ pub fn render(r: &DoctorReport) -> String {
          Live: across-ws={ws_n}/{ws_m} set, oif=idle(unverified).",
         r.uniswapx_chains.len()
     );
+    let (rpc_n, rpc_m) = r.across_rpc_ratio();
+    let cg = match &r.coingecko {
+        Some(CoinGeckoStatus::Reachable) => "reachable",
+        Some(CoinGeckoStatus::Error(_)) => "unreachable",
+        None => "not-probed",
+    };
+    let _ = writeln!(s, "Live pricing: coingecko={cg}, across-rpc={rpc_n}/{rpc_m} set (else static).");
 
     // Always show the next step (scriptable form is `--suggest`).
     let _ = writeln!(s, "\nNext (no key needed):\n    {SUGGEST_NO_KEY}");
@@ -380,7 +478,9 @@ mod tests {
             etherscan_key_present: true,
             uniswapx_chains: UNISWAPX_CHAINS.to_vec(),
             across_ws_env: vec![],
+            across_rpc_env: vec![],
             across_probe: Some(probes),
+            coingecko: None,
         };
         assert_eq!(report.across_data_ratio(), Some((3, 5)));
         let out = render(&report);
@@ -448,9 +548,64 @@ mod tests {
             etherscan_key_present: false,
             uniswapx_chains: vec![],
             across_ws_env: vec![],
+            across_rpc_env: vec![],
             across_probe: None,
+            coingecko: None,
         };
         let out = render(&r);
         assert!(out.contains("✗ NOTHING will produce data"));
+    }
+
+    /// LP-5: gather reads `ACROSS_RPC_<CHAIN>` presence per live chain (the
+    /// live-gas endpoint), independent of the WS vars.
+    #[test]
+    fn gather_reads_rpc_env() {
+        let lookup = env_from(HashMap::from([("ACROSS_RPC_ARBITRUM", "https://arb")]));
+        let r = gather(&Env { lookup: &lookup });
+        assert_eq!(r.across_rpc_ratio(), (1, 3));
+        let arb = r.across_rpc_env.iter().find(|(c, _)| *c == ChainId::ARBITRUM).unwrap();
+        assert!(arb.1, "ACROSS_RPC_ARBITRUM present");
+        let base = r.across_rpc_env.iter().find(|(c, _)| *c == ChainId::BASE).unwrap();
+        assert!(!base.1, "ACROSS_RPC_BASE absent");
+    }
+
+    /// LP-5: classify_coingecko maps the **real** `/ping` body to Reachable and
+    /// an unexpected body to Error — independent truth (the real ping shape).
+    #[test]
+    fn classify_coingecko_maps_ping() {
+        assert_eq!(
+            classify_coingecko(r#"{"gecko_says":"(V3) To the Moon!"}"#),
+            CoinGeckoStatus::Reachable
+        );
+        assert!(matches!(classify_coingecko("<html>503</html>"), CoinGeckoStatus::Error(_)));
+    }
+
+    /// LP-5: probe_coingecko classifies a canned ok body and surfaces a fetch
+    /// error as Error — no network in CI (the closure is the seam).
+    #[tokio::test]
+    async fn probe_coingecko_mocked() {
+        let ok = probe_coingecko(|| async {
+            Ok(r#"{"gecko_says":"(V3) To the Moon!"}"#.to_string())
+        })
+        .await;
+        assert_eq!(ok, CoinGeckoStatus::Reachable);
+        let err = probe_coingecko(|| async { anyhow::bail!("offline") }).await;
+        assert!(matches!(err, CoinGeckoStatus::Error(e) if e.contains("offline")));
+    }
+
+    /// LP-5: render shows the live-pricing block — CoinGecko status + per-chain
+    /// RPC readiness — so a `--live-*` run is legible before it starts.
+    #[test]
+    fn render_shows_live_pricing_readiness() {
+        let lookup = env_from(HashMap::from([("ACROSS_RPC_BASE", "https://base")]));
+        let mut r = gather(&Env { lookup: &lookup });
+        r.coingecko = Some(CoinGeckoStatus::Reachable);
+        let out = render(&r);
+        assert!(out.contains("Live pricing — readiness"));
+        assert!(out.contains("REACHABLE"));
+        assert!(out.contains("RPC-SET"), "base rpc set");
+        assert!(out.contains("RPC-MISSING"), "arb/opt rpc missing");
+        assert!(out.contains("Live gas on 1/3 configured chains"));
+        assert!(out.contains("Live pricing: coingecko=reachable, across-rpc=1/3 set"));
     }
 }

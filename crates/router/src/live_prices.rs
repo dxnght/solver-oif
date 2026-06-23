@@ -41,6 +41,14 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// CoinGecko public REST base.
 const COINGECKO_BASE: &str = "https://api.coingecko.com/api/v3";
 
+/// Descriptive User-Agent. CoinGecko **rejects requests with no User-Agent**
+/// with a 403 (reqwest sends none by default) — verified 2026-06-23: `/ping`
+/// without one returns `error_code:403 "Please add a descriptive User-Agent"`,
+/// with one returns `gecko_says`. Exported so the `doctor` reachability probe
+/// uses the *same* UA the live feed will — a "reachable" there means the feed
+/// will actually work, not just that the host is up.
+pub const USER_AGENT: &str = "solver-engine/0.0.1 (research backtest; +https://github.com/)";
+
 /// Synchronous HTTP-GET resolver: URL → response body, or a network/parse
 /// error. Injected so tests drive the feed with canned bodies (no network), the
 /// same dependency-injection the doctor Across probe uses.
@@ -110,7 +118,10 @@ impl LivePriceFeed {
         let eth = env_f64("PRICE_ETH_USD").unwrap_or(3000.0);
         let btc = env_f64("PRICE_BTC_USD").unwrap_or(100_000.0);
         let fallback = StaticPriceFeed::new(eth, btc, 0.50);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("reqwest client (TLS init)");
         let resolver: PriceResolver = Box::new(move |url: &str| http_get_blocking(&client, url));
         Self::with_resolver(fallback, resolver)
     }

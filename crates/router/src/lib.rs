@@ -24,7 +24,7 @@
 mod live_prices;
 mod prices;
 
-pub use live_prices::{LivePriceFeed, PriceResolver, PriceSource};
+pub use live_prices::{LivePriceFeed, PriceResolver, PriceSource, USER_AGENT};
 pub use prices::{PriceFeed, StaticPriceFeed};
 
 use alloy_primitives::{Address, U256};

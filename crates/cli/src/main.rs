@@ -266,7 +266,12 @@ async fn run_doctor(suggest_only: bool) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let http = reqwest::Client::new();
+    // Same User-Agent the live feed uses, so the CoinGecko probe below reflects
+    // what `--live-prices` will actually get (CoinGecko 403s a missing UA).
+    let http = reqwest::Client::builder()
+        .user_agent(solver_router::USER_AGENT)
+        .build()
+        .unwrap_or_default();
     let probes = doctor::probe_across(key.is_some(), |chain| {
         let http = http.clone();
         let key = key.clone();
@@ -285,6 +290,22 @@ async fn run_doctor(suggest_only: bool) {
     })
     .await;
     report.across_probe = Some(probes);
+
+    // CoinGecko reachability for --live-prices (single /ping; injected fetch).
+    let cg = doctor::probe_coingecko(|| {
+        let http = http.clone();
+        async move {
+            let body = http
+                .get("https://api.coingecko.com/api/v3/ping")
+                .send()
+                .await?
+                .text()
+                .await?;
+            Ok(body)
+        }
+    })
+    .await;
+    report.coingecko = Some(cg);
 
     print!("{}", doctor::render(&report));
 }
