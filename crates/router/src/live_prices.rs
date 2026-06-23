@@ -120,6 +120,9 @@ impl LivePriceFeed {
         let fallback = StaticPriceFeed::new(eth, btc, 0.50);
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            // Bound each GET so a slow CoinGecko errors (→ static fallback)
+            // rather than stalling a quote (reqwest has no default timeout).
+            .timeout(Duration::from_secs(8))
             .build()
             .expect("reqwest client (TLS init)");
         let resolver: PriceResolver = Box::new(move |url: &str| http_get_blocking(&client, url));
@@ -344,5 +347,22 @@ mod tests {
         // Scroll has no coingecko_platform mapping; unknown token → None, no call.
         let t = tok(ChainId::SCROLL, Address::repeat_byte(0x11));
         assert_eq!(feed.usd_price(t), None);
+    }
+
+    /// LP-6: `PriceSource` is a pure dispatch — Static forwards to the static
+    /// feed, Live to the live feed (here a mock returning a known number) — and
+    /// the labels are the stable summary strings.
+    #[test]
+    fn price_source_dispatch() {
+        let stat = PriceSource::Static(StaticPriceFeed::reference());
+        assert_eq!(stat.usd_price(tok(ChainId::BASE, BASE_USDC)), Some(1.0));
+        assert_eq!(stat.label(), "static");
+
+        let resolver: PriceResolver = Box::new(|_url| {
+            Ok(r#"{"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913":{"usd":0.5}}"#.to_string())
+        });
+        let live = PriceSource::Live(LivePriceFeed::with_resolver(StaticPriceFeed::reference(), resolver));
+        assert_eq!(live.usd_price(tok(ChainId::BASE, BASE_USDC)), Some(0.5));
+        assert_eq!(live.label(), "live-coingecko");
     }
 }

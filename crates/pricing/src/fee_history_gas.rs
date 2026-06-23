@@ -63,7 +63,13 @@ impl FeeHistoryGasModel {
     pub fn new(rpc_urls: HashMap<ChainId, String>) -> Self {
         Self {
             fallback: StaticGasModel,
-            http: reqwest::Client::new(),
+            // A per-request timeout so a dead/slow RPC errors (→ static
+            // fallback) instead of stalling the whole stream silently (rule #7);
+            // reqwest has no default timeout.
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .unwrap_or_default(),
             rpc_urls,
             cache: Mutex::new(HashMap::new()),
         }
@@ -323,5 +329,18 @@ mod tests {
                 "no-RPC live gas must equal static for {chain}"
             );
         }
+    }
+
+    /// LP-6: `GasSource` is a pure dispatch — Live (no RPC → static fallback)
+    /// equals Static, and the labels are the stable summary strings.
+    #[tokio::test]
+    async fn gas_source_dispatch() {
+        let live = GasSource::Live(FeeHistoryGasModel::new(HashMap::new()));
+        let stat = GasSource::Static(StaticGasModel);
+        for chain in [ChainId::BASE, ChainId::ARBITRUM] {
+            assert_eq!(live.fill_gas_native(chain).await, stat.fill_gas_native(chain).await);
+        }
+        assert_eq!(stat.label(), "static");
+        assert_eq!(live.label(), "live-feehistory");
     }
 }

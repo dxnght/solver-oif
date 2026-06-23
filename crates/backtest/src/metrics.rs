@@ -277,8 +277,8 @@ mod tests {
     use super::*;
     use alloy_primitives::{address, Address, U256};
     use chrono::{Duration, Utc};
-    use solver_pricing::StaticGasModel;
-    use solver_router::StaticPriceFeed;
+    use solver_pricing::{GasSource, StaticGasModel};
+    use solver_router::{PriceSource, StaticPriceFeed};
     use solver_types::{AssetAmount, ChainId, IntentId, SettlementType, Source, TokenRef, TxRef};
 
     const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -390,5 +390,36 @@ mod tests {
         let out = compute(&intents, &StaticPriceFeed::reference(), StaticGasModel, FillPolicy::default()).await;
         assert_eq!(out.metrics.would_fill, 1);
         assert!(out.metrics.would_fill_precision().is_none());
+    }
+
+    /// LP-6 determinism: wrapping the static feeds in the `PriceSource`/
+    /// `GasSource` dispatch enums must be a pure pass-through — the default
+    /// (static) run is byte-identical to the pre-LP bare-feed path, so CI stays
+    /// deterministic and `--live-*` is the only behaviour change. Same intents,
+    /// two constructions, identical aggregate + per-fill numbers.
+    #[tokio::test]
+    async fn static_sources_match_bare_static_feeds() {
+        let policy = FillPolicy::default();
+        let intents = vec![
+            stable_intent("uniswapx:a", 1_000_000_000, 990_000_000, Some(995_000_000), true),
+            stable_intent("uniswapx:c", 1_000_000_000, 1_005_000_000, None, true),
+        ];
+        let bare = compute(&intents, &StaticPriceFeed::reference(), StaticGasModel, policy).await;
+        let wrapped = compute(
+            &intents,
+            &PriceSource::Static(StaticPriceFeed::reference()),
+            GasSource::Static(StaticGasModel),
+            policy,
+        )
+        .await;
+        assert_eq!(bare.metrics.quoted, wrapped.metrics.quoted);
+        assert_eq!(bare.metrics.would_fill, wrapped.metrics.would_fill);
+        assert_eq!(bare.metrics.fill_reasons, wrapped.metrics.fill_reasons);
+        assert_eq!(bare.metrics.skipped, wrapped.metrics.skipped);
+        assert_eq!(bare.metrics.modeled_profit_usd_sum, wrapped.metrics.modeled_profit_usd_sum);
+        assert_eq!(
+            bare.fills.iter().map(|f| f.modeled_profit_usd).collect::<Vec<_>>(),
+            wrapped.fills.iter().map(|f| f.modeled_profit_usd).collect::<Vec<_>>(),
+        );
     }
 }

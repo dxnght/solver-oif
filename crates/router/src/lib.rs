@@ -407,6 +407,47 @@ mod tests {
         }
     }
 
+    /// LP-6 primary exit criterion: the SAME long-tail intent the static feed
+    /// skips with `price_unknown` is **quoted** under `--live-prices`, because
+    /// the live feed prices the unknown output token by contract address. One
+    /// intent, two feeds, opposite outcome — proves live prices unblock the
+    /// cross-chain long-tail (the dominant real flow). Deterministic: the live
+    /// feed runs on a mock resolver, no network.
+    #[tokio::test]
+    async fn live_prices_quote_long_tail_that_static_skips() {
+        use crate::{LivePriceFeed, PriceResolver, PriceSource};
+        let mystery = Address::repeat_byte(0x42);
+        let i = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+
+        // Static feed: unknown output token → price_unknown skip (the status quo).
+        assert!(matches!(
+            router().quote(&i, i.observed_at).await,
+            QuoteOutcome::Skipped(SkipReason::PriceUnknown)
+        ));
+
+        // Live feed: the mock prices the 0x42… token by contract; the USDC input
+        // and native ETH defer to the static fallback (empty body → Unknown).
+        let resolver: PriceResolver = Box::new(|url: &str| {
+            if url.contains("4242424242") {
+                Ok(r#"{"0x4242424242424242424242424242424242424242":{"usd":2.0}}"#.to_string())
+            } else {
+                Ok("{}".to_string())
+            }
+        });
+        let live = RouterV0::new(
+            PriceSource::Live(LivePriceFeed::with_resolver(StaticPriceFeed::reference(), resolver)),
+            StaticGasModel,
+        );
+        let q = live
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("live prices should quote the long-tail token");
+        // 1000 USDC in ($1000) − 1.0 token out ($2) − tiny Base gas ≈ $998.
+        assert!(q.expected_profit_usd > 900.0, "profit {}", q.expected_profit_usd);
+    }
+
     /// Evaluating after the deadline → Expired (the live liveness gate).
     #[tokio::test]
     async fn expired_intent_is_skipped() {
