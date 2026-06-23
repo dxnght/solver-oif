@@ -224,3 +224,157 @@ async fn serve_404(stream: &mut TcpStream) -> std::io::Result<()> {
     stream.write_all(resp.as_bytes()).await?;
     stream.flush().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::live::DecisionRecord;
+    use chrono::Utc;
+    use std::time::Duration;
+
+    /// A distinctive record so the round-trip asserts the real payload, not a
+    /// coincidence. Skipped intent (no quote) → the `Option`s are `None`.
+    fn sample_record() -> DecisionRecord {
+        DecisionRecord {
+            intent_id: "across:base:arbitrum:dash-test".into(),
+            route: "base->arbitrum/833589->af88d0".into(),
+            observed_at: Utc::now(),
+            as_of: Utc::now(),
+            would_fill: false,
+            reason: "exclusive_to_other".into(),
+            expected_profit_usd: None,
+            confidence: None,
+            gas_usd: None,
+            verify_url: Some("https://basescan.org/tx/0xabc".into()),
+            retrospective: false,
+        }
+    }
+
+    /// Drive a raw HTTP request and read the whole response (server sends
+    /// `Connection: close` for one-shot routes, so read-to-EOF terminates).
+    async fn http_get(addr: SocketAddr, path: &str) -> String {
+        let mut s = TcpStream::connect(addr).await.expect("connect");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        s.write_all(req.as_bytes()).await.expect("write request");
+        let mut resp = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut resp))
+            .await
+            .expect("response timed out")
+            .expect("read response");
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// Read an SSE response until the first complete `data: …\n\n` frame.
+    async fn read_first_event(addr: SocketAddr) -> String {
+        let mut s = TcpStream::connect(addr).await.expect("connect");
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        let read = async {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = s.read(&mut tmp).await.expect("read events");
+                assert!(n > 0, "stream closed before an event arrived");
+                buf.extend_from_slice(&tmp[..n]);
+                let text = String::from_utf8_lossy(&buf);
+                if let Some(start) = text.find("data: ") {
+                    if text[start..].contains("\n\n") {
+                        return text.into_owned();
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("event timed out")
+    }
+
+    /// `GET /` returns the embedded dashboard HTML with the right envelope.
+    #[tokio::test]
+    async fn serves_embedded_html() {
+        let h = serve(0).await.expect("serve");
+        let resp = http_get(h.addr, "/").await;
+        assert!(resp.contains("200 OK"), "expected 200, got:\n{resp}");
+        assert!(
+            resp.to_lowercase().contains("content-type: text/html"),
+            "expected html content-type"
+        );
+        assert!(resp.contains("<!doctype html"), "expected the embedded page body");
+    }
+
+    /// `GET /events` is an event-stream and forwards a published
+    /// `DecisionRecord` — including the replay buffer, so a record published
+    /// before the client connects still arrives — round-tripping intact.
+    #[tokio::test]
+    async fn events_streams_published_decision() {
+        let h = serve(0).await.expect("serve");
+        let rec = sample_record();
+        h.publish(&rec); // lands in the replay buffer before the client connects
+
+        let text = read_first_event(h.addr).await;
+        assert!(
+            text.to_lowercase().contains("content-type: text/event-stream"),
+            "expected event-stream content-type, got:\n{text}"
+        );
+
+        // Extract the JSON between `data: ` and the frame terminator `\n\n`.
+        let start = text.find("data: ").expect("a data frame") + "data: ".len();
+        let rest = &text[start..];
+        let end = rest.find("\n\n").expect("frame terminator");
+        let json = &rest[..end];
+
+        let back: DecisionRecord = serde_json::from_str(json).expect("valid record JSON");
+        assert_eq!(back.intent_id, rec.intent_id);
+        assert_eq!(back.route, rec.route);
+        assert_eq!(back.reason, rec.reason);
+        assert_eq!(back.would_fill, rec.would_fill);
+        assert_eq!(back.verify_url, rec.verify_url);
+    }
+
+    /// A live decision published while a client is connected is pushed without
+    /// the client having to reconnect (the broadcast path, not just replay).
+    #[tokio::test]
+    async fn events_pushes_live_after_connect() {
+        let h = serve(0).await.expect("serve");
+
+        let mut s = TcpStream::connect(h.addr).await.expect("connect");
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+        // Drain the header block so the next read sees only the live frame.
+        let read_headers = async {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            while !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                let n = s.read(&mut tmp).await.expect("read headers");
+                assert!(n > 0, "closed before headers");
+                buf.extend_from_slice(&tmp[..n]);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), read_headers)
+            .await
+            .expect("headers timed out");
+
+        // Publish AFTER the client is subscribed → exercises the broadcast.
+        let rec = sample_record();
+        h.publish(&rec);
+
+        let read_frame = async {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = s.read(&mut tmp).await.expect("read frame");
+                assert!(n > 0, "closed before live frame");
+                buf.extend_from_slice(&tmp[..n]);
+                if String::from_utf8_lossy(&buf).contains("\n\n") {
+                    return String::from_utf8_lossy(&buf).into_owned();
+                }
+            }
+        };
+        let frame = tokio::time::timeout(Duration::from_secs(5), read_frame)
+            .await
+            .expect("live frame timed out");
+        assert!(frame.contains(&rec.intent_id), "live frame missing the record");
+    }
+}
