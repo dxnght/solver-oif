@@ -58,8 +58,9 @@ static-ціни (та ще й тавтологічної: модель і realiz
   коментар посилається на `DEPLOYMENTS.md`, якого в репо OIF немає; «тест» —
   тавтологія. **Не довіряти, поки не звірено on-chain.** Тримати OIF idle.
 - ✅ **Across-події (історичні) на поточному поколінні** — закрито в B2: ingest читає
-  `FilledRelay` (bytes32) з канонічного ABI. Лишається: live-WS-адаптер (B4) і JOIN
-  depozit↔fill (PATH, окремий bucket) — обидва ще на старому/відсутньому шляху.
+  `FilledRelay` (bytes32) з канонічного ABI. ✅ **live-WS-адаптер — закрито в B4**
+  (`eth_subscribe` на `FundsDeposited`-депозити). Лишається: JOIN depozit↔fill
+  (PATH, окремий bucket).
 - 🟡 **Дрейф ширини**: додано FEED/PATH/OIF замість консолідації (doctor/B2). Заморозити.
 - **Компіляція не підтверджена незалежним аудитом** (потрібні build/test-логи).
 
@@ -70,9 +71,15 @@ static-ціни (та ще й тавтологічної: модель і realiz
    (`dest_summary` — окремо, за потреби.)
 3. ✅ **B2 — Across historical ingest + Etherscan-V2 проба в `doctor`**: поточне покоління
    `FilledRelay`, калібрування побігло крос-чейн — **зроблено** (AX-1..7).
-4. **B3 (наступне)** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз
-   навмисно нижче порога на static-цінах).
-5. **B4** — live Across shadow (WS-адаптер на `FilledRelay`, нуль транзакцій).
+4. ✅ **B4 — live Across shadow**: WS `eth_subscribe` на `FundsDeposited` (origin-депозити),
+   спільний `decide()` (один `FillPolicy` у live і backtest), decisions JSONL із verify_url,
+   нуль транзакцій; `doctor` показує WS-готовність — **зроблено** (LIV-1..6).
+5. ✅ **B3 — live gas/prices**: CoinGecko-ціни за контракт-адресою (long-tail) +
+   `eth_feeHistory`-газ (`ACROSS_RPC_<CHAIN>`), за прапорцем `--live-prices`/`--live-gas`,
+   fallback static, дефолт off (детермінізм CI), `--reproducible` перекриває — **зроблено**
+   (LP-1..6). Наживо: `--live-prices` зняв 171 long-tail-інтент із `price_unknown`
+   (quoted 6597→6768); `--live-gas` здешевив L2-газ (would_fill 100→105). Крос-клас
+   confidence лишається консервативно нижче порога (feed-aware тюнінг — можливий наступний крок).
 6. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)

@@ -35,12 +35,20 @@ Exit (виконано): backtest включає Across, would_fill-калібр
 Свідомо **поза** скоупом (окремі buckets): deposits-скан + JOIN depozit↔fill (PATH);
 старе покоління `FilledV3Relay`; live-WS.
 
-**B3 — Live gas/prices (вивести would_fill із шумової смуги). НАСТУПНЕ.**
-`eth_feeHistory`-газ по чейну + live ETH/BTC, **за прапорцем**, fallback static,
-дефолт off (детермінізм CI). Калібрувати `clearing_delay` з даних, не з руки.
+**B3 — Live gas/prices. ✅ ЗРОБЛЕНО (LP-1..6).**
+`eth_feeHistory`-газ по чейну (`ACROSS_RPC_<CHAIN>`) + CoinGecko-ціни за контракт-адресою
+(long-tail fix), **за прапорцем** `--live-prices`/`--live-gas`, fallback static + WARN,
+дефолт off (детермінізм CI); `--reproducible` перекриває на static. `doctor` показує
+live-pricing-готовність (CoinGecko ping + per-chain RPC). Наживо: `--live-prices` зняв 171
+long-tail-інтент із `price_unknown` (quoted 6597→6768); `--live-gas` здешевив L2-газ
+(would_fill 100→105). Платформ-id CoinGecko та topic0/RPC-формати звірено з живими джерелами.
+Крос-клас confidence лишається консервативно нижче порога (feed-aware тюнінг — окремо).
 
-**B4 — Live Across shadow.** WS-адаптер на поточний `FilledRelay`, нуль транзакцій;
-реюз нормалайзера B2 (один `FillPolicy` у live і backtest).
+**B4 — Live Across shadow. ✅ ЗРОБЛЕНО (LIV-1..6).**
+WS `eth_subscribe` на `FundsDeposited` (origin-депозити, **не** `FilledRelay` — це open-side
+рестрім), спільний `decide()` (один `FillPolicy` у live і backtest), decisions JSONL із
+verify_url на origin-tx, нуль транзакцій; `doctor` показує WS-готовність. topic0 звірено
+з реальним on-chain-логом.
 
 **Тільки після B0–B4 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
