@@ -60,15 +60,19 @@ pub type PriceResolver = Box<dyn Fn(&str) -> anyhow::Result<String> + Send + Syn
 /// (rule #2); the static fallback still answers for those.
 ///
 /// Verified 2026-06-23 by fetching `/asset_platforms` and matching each id's
-/// `chain_identifier`: ethereum=1, polygon-pos=137, arbitrum-one=42161,
-/// base=8453, optimistic-ethereum=10.
+/// `chain_identifier`: ethereum=1, optimistic-ethereum=10,
+/// binance-smart-chain=56, polygon-pos=137, world-chain=480, arbitrum-one=42161,
+/// ink=57073, base=8453. (B6/COV-1 added bsc/world-chain/ink — same live check.)
 fn coingecko_platform(chain: ChainId) -> Option<&'static str> {
     Some(match chain {
         ChainId::ETHEREUM => "ethereum",
-        ChainId::POLYGON => "polygon-pos",
-        ChainId::ARBITRUM => "arbitrum-one",
-        ChainId::BASE => "base",
         ChainId::OPTIMISM => "optimistic-ethereum",
+        ChainId::BSC => "binance-smart-chain",
+        ChainId::POLYGON => "polygon-pos",
+        ChainId::WORLDCHAIN => "world-chain",
+        ChainId::ARBITRUM => "arbitrum-one",
+        ChainId::INK => "ink",
+        ChainId::BASE => "base",
         _ => return None,
     })
 }

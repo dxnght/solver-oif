@@ -12,6 +12,7 @@ pub struct ChainId(pub u64);
 impl ChainId {
     pub const ETHEREUM: ChainId = ChainId(1);
     pub const OPTIMISM: ChainId = ChainId(10);
+    pub const BSC: ChainId = ChainId(56);
     pub const POLYGON: ChainId = ChainId(137);
     pub const ZKSYNC: ChainId = ChainId(324);
     pub const WORLDCHAIN: ChainId = ChainId(480);
@@ -44,6 +45,7 @@ impl ChainId {
         match self.0 {
             1 => "ethereum",
             10 => "optimism",
+            56 => "bsc",
             130 => "unichain",
             137 => "polygon",
             143 => "monad",
@@ -80,6 +82,7 @@ impl ChainId {
         let c = match name.trim().to_ascii_lowercase().as_str() {
             "ethereum" => Self::ETHEREUM,
             "optimism" => Self::OPTIMISM,
+            "bsc" => Self::BSC,
             "unichain" => Self::UNICHAIN,
             "polygon" => Self::POLYGON,
             "monad" => Self::MONAD,
@@ -177,7 +180,7 @@ mod tests {
     #[test]
     fn named_chains_resolve() {
         let named = [
-            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::POLYGON, ChainId::ZKSYNC,
+            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::BSC, ChainId::POLYGON, ChainId::ZKSYNC,
             ChainId::WORLDCHAIN, ChainId::REDSTONE, ChainId::BOBA, ChainId::LISK,
             ChainId::POLYGON_ZKEVM, ChainId::MODE, ChainId::MANTLE, ChainId::BASE,
             ChainId::ARBITRUM, ChainId::ZORA, ChainId::SCROLL, ChainId::LINEA,
@@ -197,7 +200,7 @@ mod tests {
     #[test]
     fn from_name_roundtrips_named_chains() {
         let named = [
-            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::POLYGON, ChainId::ZKSYNC,
+            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::BSC, ChainId::POLYGON, ChainId::ZKSYNC,
             ChainId::WORLDCHAIN, ChainId::REDSTONE, ChainId::BOBA, ChainId::LISK,
             ChainId::POLYGON_ZKEVM, ChainId::MODE, ChainId::MANTLE, ChainId::BASE,
             ChainId::ARBITRUM, ChainId::ZORA, ChainId::SCROLL, ChainId::LINEA,
