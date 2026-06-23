@@ -244,9 +244,12 @@ function fmtProfit(p) {
   return `<span style="color:${c}">$${v.toFixed(2)}</span>`;
 }
 
+// INVARIANT: every <td> in a row comes from the same record (DFIX-1).
 // One DecisionRecord in, the whole <tr> out. Route, reason, profit and the
 // verify link are all read off the same `rec`, so a row can never splice a
-// route from one record onto a verify link from another (DFIX-1).
+// route from one record onto a verify link from another. If you add a column,
+// read it off `rec` here — never from a parallel array or a sibling panel's
+// data (e.g. the routes/chains tallies), or rows will desync.
 function feedRow(rec) {
   const { pair } = parseRoute(rec.route);
   const reason = esc(rec.reason || "?");
