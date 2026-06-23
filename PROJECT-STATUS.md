@@ -80,7 +80,13 @@ static-ціни (та ще й тавтологічної: модель і realiz
    (LP-1..6). Наживо: `--live-prices` зняв 171 long-tail-інтент із `price_unknown`
    (quoted 6597→6768); `--live-gas` здешевив L2-газ (would_fill 100→105). Крос-клас
    confidence лишається консервативно нижче порога (feed-aware тюнінг — можливий наступний крок).
-6. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+6. ✅ **B5 — live observability dashboard**: zero-dep tokio HTTP/SSE-сервер за прапорцем
+   `--dashboard-port` у `solver live` — стрімить **той самий** `DecisionRecord`-потік
+   (broadcast + replay-буфер) у вбудований vanilla-JS дашборд; наратив — exclusivity-capture
+   і склад потоку (маршрути/dest-чейни/reason/feed із verify-лінками), не would_fill;
+   без прапорця B4 незмінна — **зроблено** (DASH-1..4). Реалізує application-ідею #1.
+   Ще не прогнано проти живого WS-фіда (`ACROSS_WS_<CHAIN>`).
+7. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

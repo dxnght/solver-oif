@@ -50,7 +50,20 @@ WS `eth_subscribe` на `FundsDeposited` (origin-депозити, **не** `Fil
 verify_url на origin-tx, нуль транзакцій; `doctor` показує WS-готовність. topic0 звірено
 з реальним on-chain-логом.
 
-**Тільки після B0–B4 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
+**B5 — Live observability dashboard. ✅ ЗРОБЛЕНО (DASH-1..4).**
+Zero-dep tokio HTTP/SSE-сервер (без web-фреймворку/білд-кроку): `GET /` віддає вбудований
+(`include_str!`) `dashboard.html`; `GET /events` стрімить кожен `DecisionRecord` як SSE-подію
+через `broadcast`-канал + replay-буфер (новий клієнт бачить свіжий потік, не порожній екран).
+За прапорцем `--dashboard-port` у `solver live` — публікує **той самий** decision-потік у
+broadcast **на додачу** до JSONL (без дублювання `decide`-логіки); без прапорця B4 незмінна.
+Наратив — exclusivity-capture (`exclusive_to_other` % від усіх) і склад потоку (топ
+origin→dest-маршрути / dest-чейни / reason-breakdown / live-feed із клікабельними verify-лінками),
+**не** would_fill (edge≈0 — чесно підписано). Інтеграційні тести на ефемерному порту (без
+браузера): `GET /` віддає HTML; `GET /events` — `text/event-stream` і прокидає опублікований
+`DecisionRecord` (replay + live-broadcast). Реалізує application-ідею #1 (публічний intent-flow
+дашборд). Ще не прогнано проти живого WS-фіда (потрібні `ACROSS_WS_<CHAIN>`).
+
+**Тільки після B0–B5 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
 
