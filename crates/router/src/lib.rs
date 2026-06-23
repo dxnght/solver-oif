@@ -24,6 +24,7 @@
 mod live_prices;
 mod prices;
 
+use live_prices::chain_price_supported;
 pub use live_prices::{LivePriceFeed, PriceResolver, PriceSource, USER_AGENT};
 pub use prices::{PriceFeed, StaticPriceFeed};
 
@@ -56,8 +57,9 @@ pub const CONF_CROSS_CLASS: f64 = 0.40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
-    /// A side's token (or the dest-chain gas token) has no known USD price
-    /// offline — we refuse to invent one (CLAUDE.md rule #2).
+    /// A token on a **covered** chain (one with a verified price platform) has
+    /// no known USD price — we looked and missed; we refuse to invent one
+    /// (CLAUDE.md rule #2). Distinct from [`Self::UnsupportedChain`].
     PriceUnknown,
     /// The intent's deadline is at/before the evaluation time — unfillable.
     Expired,
@@ -65,6 +67,12 @@ pub enum SkipReason {
     ExclusiveToOther,
     /// Input or required output is zero — nothing to quote.
     DustAmount,
+    /// A side's token is on a chain **outside our price coverage** (no verified
+    /// CoinGecko platform — non-EVM, or an EVM L2 we have not mapped). The price
+    /// is unobtainable structurally, not merely missing for this token — the
+    /// dashboard shows this as "out of reach" vs `price_unknown`'s "reachable
+    /// but unpriced" (B6/COV-2). Additive — appended, never a rename.
+    UnsupportedChain,
 }
 
 impl SkipReason {
@@ -74,6 +82,19 @@ impl SkipReason {
             SkipReason::Expired => "expired",
             SkipReason::ExclusiveToOther => "exclusive_to_other",
             SkipReason::DustAmount => "dust_amount",
+            SkipReason::UnsupportedChain => "unsupported_chain",
+        }
+    }
+
+    /// Classify a missing USD price by whether `chain` is within our by-address
+    /// price coverage: a covered chain we simply couldn't price this token on is
+    /// [`Self::PriceUnknown`]; an out-of-coverage chain is
+    /// [`Self::UnsupportedChain`]. The single place this split is decided.
+    fn for_missing_price(chain: ChainId) -> SkipReason {
+        if chain_price_supported(chain) {
+            SkipReason::PriceUnknown
+        } else {
+            SkipReason::UnsupportedChain
         }
     }
 }
@@ -127,17 +148,20 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
         }
 
         // 2. Value both sides + the dest-chain gas in USD; any unknown → skip.
+        //    A missing price is classified by the *failing* token's chain:
+        //    out-of-coverage → unsupported_chain, covered → price_unknown.
         let in_tok = intent.input.token;
         let out_tok = intent.output_min.token;
         let (price_in, price_out) =
             match (self.prices.usd_price(in_tok), self.prices.usd_price(out_tok)) {
                 (Some(a), Some(b)) => (a, b),
-                _ => return QuoteOutcome::Skipped(SkipReason::PriceUnknown),
+                (None, _) => return QuoteOutcome::Skipped(SkipReason::for_missing_price(in_tok.chain)),
+                (_, None) => return QuoteOutcome::Skipped(SkipReason::for_missing_price(out_tok.chain)),
             };
         let native = TokenRef::new(intent.dest_chain, Address::ZERO);
         let native_price = match self.prices.usd_price(native) {
             Some(p) => p,
-            None => return QuoteOutcome::Skipped(SkipReason::PriceUnknown),
+            None => return QuoteOutcome::Skipped(SkipReason::for_missing_price(intent.dest_chain)),
         };
 
         let revenue_usd = intent.input.to_f64() * price_in;

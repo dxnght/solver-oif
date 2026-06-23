@@ -310,7 +310,7 @@ mod tests {
         // reason is one of the stable Skip/FillReason strings — never a new one.
         const STABLE: &[&str] = &[
             "fill", "suspect", "unprofitable", "below_margin", "price_unknown", "expired",
-            "exclusive_to_other", "dust_amount",
+            "exclusive_to_other", "dust_amount", "unsupported_chain",
         ];
         assert!(STABLE.contains(&rec.reason.as_str()), "non-stable reason {}", rec.reason);
         // This stable route quotes → all three quote numbers present together.

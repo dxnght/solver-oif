@@ -77,6 +77,19 @@ fn coingecko_platform(chain: ChainId) -> Option<&'static str> {
     })
 }
 
+/// Whether our price feed can value **arbitrary tokens by contract address** on
+/// `chain` — i.e. the chain has a verified CoinGecko platform above. A chain
+/// outside this set is "out of reach" (non-EVM, or an EVM L2 we have not mapped
+/// yet): the Router reports such a skip as `unsupported_chain` rather than the
+/// reachable-but-unpriced `price_unknown`, so the dashboard can tell a
+/// structural coverage gap from a token-coverage gap (B6/COV-2). This is a
+/// property of the chain, independent of which feed is active — it describes
+/// our system's by-address pricing reach, of which the static feed is only a
+/// few-token fallback.
+pub(crate) fn chain_price_supported(chain: ChainId) -> bool {
+    coingecko_platform(chain).is_some()
+}
+
 /// CoinGecko coin id of `chain`'s **native** gas token, for
 /// `/simple/price?ids={id}`. Only the ETH-native chains are mapped (`ethereum`
 /// verified live → real USD on 2026-06-23). Polygon's native is deliberately
