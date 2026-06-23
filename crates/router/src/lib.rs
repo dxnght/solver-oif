@@ -21,8 +21,10 @@
 //! for a **cross-class** one (ETH→USDC) where real DEX slippage is unmodeled —
 //! hence the lower confidence on cross-class routes.
 
+mod live_prices;
 mod prices;
 
+pub use live_prices::{LivePriceFeed, PriceResolver};
 pub use prices::{PriceFeed, StaticPriceFeed};
 
 use alloy_primitives::{Address, U256};

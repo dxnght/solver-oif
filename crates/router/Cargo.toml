@@ -10,6 +10,13 @@ solver-pricing   = { workspace = true }
 alloy-primitives = { workspace = true }
 chrono           = { workspace = true }
 serde            = { workspace = true }
+# Live price feed (LivePriceFeed, --live-prices). The PriceFeed trait is sync,
+# so the live CoinGecko GET bridges to async via tokio block_in_place.
+anyhow           = { workspace = true }
+reqwest          = { workspace = true }
+serde_json       = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
 
 [dev-dependencies]
 tokio            = { workspace = true }
