@@ -382,4 +382,44 @@ mod tests {
         assert_eq!(live.usd_price(tok(ChainId::BASE, BASE_USDC)), Some(0.5));
         assert_eq!(live.label(), "live-coingecko");
     }
+
+    /// COV-1/COV-3: each newly-mapped chain queries CoinGecko via its **verified**
+    /// platform segment (the live `/asset_platforms` id) and a token there
+    /// resolves by contract address. The mock asserts the URL the feed actually
+    /// builds — independent truth (the wire request), not a readback of the
+    /// mapping constant.
+    #[test]
+    fn newly_mapped_chains_query_verified_platform() {
+        let cases = [
+            (ChainId::INK, "/simple/token_price/ink"),
+            (ChainId::WORLDCHAIN, "/simple/token_price/world-chain"),
+            (ChainId::BSC, "/simple/token_price/binance-smart-chain"),
+        ];
+        for (chain, segment) in cases {
+            let segment = segment.to_string();
+            let resolver: PriceResolver = Box::new(move |url: &str| {
+                assert!(url.contains(&segment), "chain {chain:?} must query {segment}, got {url}");
+                Ok(r#"{"0x4242424242424242424242424242424242424242":{"usd":1.23}}"#.to_string())
+            });
+            let feed = LivePriceFeed::with_resolver(StaticPriceFeed::reference(), resolver);
+            assert_eq!(
+                feed.usd_price(tok(chain, Address::repeat_byte(0x42))),
+                Some(1.23),
+                "chain {chain:?} should resolve by contract address via its platform",
+            );
+        }
+    }
+
+    /// COV-2 contract: coverage tracks the platform map — the newly-mapped chains
+    /// count as supported (a miss there is `price_unknown`), unmapped ones do not
+    /// (a miss there is `unsupported_chain`). Guards the two from drifting apart.
+    #[test]
+    fn chain_price_supported_tracks_platform_map() {
+        for c in [ChainId::BASE, ChainId::ETHEREUM, ChainId::INK, ChainId::WORLDCHAIN, ChainId::BSC] {
+            assert!(chain_price_supported(c), "{c:?} is mapped → supported");
+        }
+        for c in [ChainId::SCROLL, ChainId::LINEA, ChainId(424_242)] {
+            assert!(!chain_price_supported(c), "{c:?} is unmapped → unsupported");
+        }
+    }
 }

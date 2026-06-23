@@ -472,6 +472,42 @@ mod tests {
         assert!(q.expected_profit_usd > 900.0, "profit {}", q.expected_profit_usd);
     }
 
+    /// COV-2/COV-3: a missing USD price is split by chain coverage. On a covered
+    /// chain (Base has a verified price platform) an unknown token still skips as
+    /// `price_unknown` — the input is priced, the output token simply isn't. On
+    /// an out-of-coverage chain (Scroll has no platform) the same unknown token
+    /// skips as `unsupported_chain` — structurally out of reach, not merely
+    /// missed. Checked on both the output side (dest) and the input side (origin)
+    /// so both skip arms are exercised.
+    #[tokio::test]
+    async fn missing_price_splits_unsupported_vs_unknown() {
+        let mystery = Address::repeat_byte(0x42);
+
+        // Covered dest chain, unknown output token → price_unknown.
+        let covered = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+        assert!(
+            matches!(router().quote(&covered, covered.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::PriceUnknown)),
+            "unknown token on a covered chain must be price_unknown"
+        );
+
+        // Out-of-coverage dest chain (Scroll), unknown output token → unsupported_chain.
+        let bad_dest = intent(ChainId::BASE, ChainId::SCROLL, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+        assert!(
+            matches!(router().quote(&bad_dest, bad_dest.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)),
+            "token on an out-of-coverage dest chain must be unsupported_chain"
+        );
+
+        // Out-of-coverage origin chain (Scroll), unknown input token → unsupported_chain.
+        let bad_origin = intent(ChainId::SCROLL, ChainId::BASE, mystery, 1_000_000_000_000_000_000, 18, BASE_USDC, 1_000_000_000, 6);
+        assert!(
+            matches!(router().quote(&bad_origin, bad_origin.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)),
+            "token on an out-of-coverage origin chain must be unsupported_chain"
+        );
+    }
+
     /// Evaluating after the deadline → Expired (the live liveness gate).
     #[tokio::test]
     async fn expired_intent_is_skipped() {
