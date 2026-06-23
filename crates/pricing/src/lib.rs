@@ -8,9 +8,11 @@
 //! sourcing (odos) and live gas (`eth_feeHistory`) return in later buckets,
 //! behind a flag, default off — never as a horizontal sweep (CLAUDE.md rule #5).
 
+mod fee_history_gas;
 mod gas;
 mod offline;
 
+pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GAS_RPC_CHAINS};
 pub use gas::{GasModel, StaticGasModel};
 pub use offline::OfflineIdentityPricer;
 
