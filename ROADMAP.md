@@ -63,7 +63,16 @@ origin→dest-маршрути / dest-чейни / reason-breakdown / live-feed 
 `DecisionRecord` (replay + live-broadcast). Реалізує application-ідею #1 (публічний intent-flow
 дашборд). Ще не прогнано проти живого WS-фіда (потрібні `ACROSS_WS_<CHAIN>`).
 
-**Тільки після B0–B5 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
+**B6 — Розширення price-feed coverage. ✅ ЗРОБЛЕНО (COV-1..3).** Вузький, observability-only —
+повнота дашборда, не пошук edge. CoinGecko platform-мапа доповнена `bsc`→binance-smart-chain,
+`worldchain`→world-chain, `ink`→ink (кожен platform-id звірено з живим `/asset_platforms`
+2026-06-23; `BSC`=56 — новий `ChainId`). Новий additive skip-reason `unsupported_chain`:
+відсутню ціну тепер класифіковано за покриттям чейна — поза покриттям (нема verified-платформи:
+не-EVM або ще не змаплений L2) → `unsupported_chain` («поза досяжністю»), покритий чейн із
+незнайденим токеном → `price_unknown` («у досяжності, ціни нема»). Дашборд розрізняє їх (різні
+кольори), % класифікованого потоку зростає. Не чіпали не-EVM і native-gas-мапу (поза скоупом).
+
+**Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
 

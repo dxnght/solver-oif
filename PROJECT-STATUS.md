@@ -86,7 +86,12 @@ static-ціни (та ще й тавтологічної: модель і realiz
    і склад потоку (маршрути/dest-чейни/reason/feed із verify-лінками), не would_fill;
    без прапорця B4 незмінна — **зроблено** (DASH-1..4). Реалізує application-ідею #1.
    Ще не прогнано проти живого WS-фіда (`ACROSS_WS_<CHAIN>`).
-7. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+7. ✅ **B6 — розширення price-feed coverage** (вузький, observability-only): CoinGecko
+   platform-мапа +bsc/world-chain/ink (platform-id звірено з живим `/asset_platforms`;
+   `ChainId::BSC`=56 додано), новий additive skip-reason `unsupported_chain` — відсутню ціну
+   класифіковано за покриттям чейна (поза покриттям → `unsupported_chain`, покритий чейн без
+   ціни токена → `price_unknown`) — **зроблено** (COV-1..3). Не чіпали не-EVM / native-gas.
+8. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.
