@@ -20,7 +20,7 @@ reqwest          = { workspace = true }
 serde            = { workspace = true }
 serde_json       = { workspace = true }
 chrono           = { workspace = true }
-tokio            = { workspace = true }
+tokio            = { workspace = true, features = ["net", "io-util"] }
 tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
 

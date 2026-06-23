@@ -85,6 +85,7 @@ pub async fn run(
     sources: Vec<String>,
     duration: Option<u64>,
     out_dir: &str,
+    dashboard_port: Option<u16>,
     prices: PriceSource,
     gas: GasSource,
 ) -> Result<()> {
@@ -124,6 +125,18 @@ pub async fn run(
     info!(source = source.name(), out = %path.display(), duration_s = ?duration,
         prices = prices.label(), gas = gas.label(),
         "live shadow started (zero transactions)");
+
+    // Optional live dashboard: serves the SAME decisions over SSE (rule #5 —
+    // consume the one stream, never re-derive). Without `--dashboard-port` this
+    // stays `None` and the loop behaves exactly as B4.
+    let dashboard = match dashboard_port {
+        Some(port) => {
+            let handle = crate::dashboard::serve(port).await?;
+            info!("dashboard: http://127.0.0.1:{}", handle.addr.port());
+            Some(handle)
+        }
+        None => None,
+    };
 
     let router = RouterV0::new(prices, gas);
     let policy = FillPolicy::default();
@@ -167,6 +180,11 @@ pub async fn run(
                         would_fill = record.would_fill, reason = %record.reason,
                         profit_usd = ?record.expected_profit_usd, "shadow decision"
                     );
+                    // Fan out to the dashboard (if any) in ADDITION to the
+                    // durable JSONL write — never instead of it.
+                    if let Some(d) = &dashboard {
+                        d.publish(&record);
+                    }
                     if sink.is_none() {
                         sink = Some(JsonlSink::open(&path).await?);
                     }

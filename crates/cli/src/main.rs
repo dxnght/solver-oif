@@ -6,6 +6,7 @@
 //! (settler address unverified) and says so loudly rather than failing
 //! silently (legibility is first-class — `CLAUDE.md` §7).
 
+mod dashboard;
 mod doctor;
 mod live;
 
@@ -72,6 +73,10 @@ enum Command {
         /// Output directory for the decisions JSONL.
         #[arg(long, default_value = live::LIVE_OUT_DIR)]
         out: String,
+        /// Serve a live observability dashboard on `127.0.0.1:<port>` (SSE of
+        /// the same shadow decisions). Omit to keep the plain B4 behavior.
+        #[arg(long)]
+        dashboard_port: Option<u16>,
         /// Price the long-tail via live CoinGecko instead of the static feed —
         /// the cross-chain stream is mostly long-tail, so without this it is
         /// nearly all `price_unknown`. Default off.
@@ -147,7 +152,16 @@ async fn main() -> anyhow::Result<()> {
             let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
             run_backtest(&out_dir, prices, gas).await
         }
-        Command::Live { chains, sources, duration, out, live_prices, live_gas, reproducible } => {
+        Command::Live {
+            chains,
+            sources,
+            duration,
+            out,
+            dashboard_port,
+            live_prices,
+            live_gas,
+            reproducible,
+        } => {
             let chains = parse_chains(&chains)?;
             let sources: Vec<String> = sources
                 .split(',')
@@ -155,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|s| !s.is_empty())
                 .collect();
             let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
-            live::run(chains, sources, duration, &out, prices, gas).await
+            live::run(chains, sources, duration, &out, dashboard_port, prices, gas).await
         }
         Command::Doctor { suggest } => {
             run_doctor(suggest).await;
