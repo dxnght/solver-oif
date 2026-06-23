@@ -244,29 +244,34 @@ function fmtProfit(p) {
   return `<span style="color:${c}">$${v.toFixed(2)}</span>`;
 }
 
-function renderFeed() {
-  const el = document.getElementById("feed");
-  if (!state.feed.length) {
-    el.innerHTML = '<tr><td class="empty" colspan="5">waiting for intents…</td></tr>';
-    return;
-  }
-  el.innerHTML = state.feed.map((rec) => {
-    const { pair } = parseRoute(rec.route);
-    const reason = esc(rec.reason || "?");
-    const reasonCell = rec.would_fill
-      ? `<span class="badge wf">would_fill</span>`
-      : `<span style="color:${colorFor(rec.reason)}">${reason}</span>`;
-    const link = (typeof rec.verify_url === "string" && rec.verify_url.startsWith("https://"))
-      ? `<a href="${esc(rec.verify_url)}" target="_blank" rel="noopener">tx ↗</a>`
-      : '<span style="color:var(--dim)">—</span>';
-    return `<tr class="${rec.would_fill ? "wf" : ""}">
+// One DecisionRecord in, the whole <tr> out. Route, reason, profit and the
+// verify link are all read off the same `rec`, so a row can never splice a
+// route from one record onto a verify link from another (DFIX-1).
+function feedRow(rec) {
+  const { pair } = parseRoute(rec.route);
+  const reason = esc(rec.reason || "?");
+  const reasonCell = rec.would_fill
+    ? `<span class="badge wf">would_fill</span>`
+    : `<span style="color:${colorFor(rec.reason)}">${reason}</span>`;
+  const link = (typeof rec.verify_url === "string" && rec.verify_url.startsWith("https://"))
+    ? `<a href="${esc(rec.verify_url)}" target="_blank" rel="noopener">tx ↗</a>`
+    : '<span style="color:var(--dim)">—</span>';
+  return `<tr class="${rec.would_fill ? "wf" : ""}">
       <td style="color:var(--dim)">${esc(fmtTime(rec))}</td>
       <td class="route">${esc(pair)}</td>
       <td class="reason">${reasonCell}</td>
       <td>${fmtProfit(rec.expected_profit_usd)}</td>
       <td>${link}</td>
     </tr>`;
-  }).join("");
+}
+
+function renderFeed() {
+  const el = document.getElementById("feed");
+  if (!state.feed.length) {
+    el.innerHTML = '<tr><td class="empty" colspan="5">waiting for intents…</td></tr>';
+    return;
+  }
+  el.innerHTML = state.feed.map(feedRow).join("");
 }
 
 function render() {
