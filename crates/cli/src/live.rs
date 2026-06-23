@@ -19,8 +19,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use solver_ingest::{AcrossLive, JsonlSink, LiveSource, SourceKind};
-use solver_pricing::StaticGasModel;
-use solver_router::{Decision, RouterV0, StaticPriceFeed};
+use solver_pricing::GasSource;
+use solver_router::{Decision, PriceSource, RouterV0};
 use solver_types::{ChainId, FillPolicy, NormalizedIntent};
 use tracing::{info, warn};
 
@@ -85,6 +85,8 @@ pub async fn run(
     sources: Vec<String>,
     duration: Option<u64>,
     out_dir: &str,
+    prices: PriceSource,
+    gas: GasSource,
 ) -> Result<()> {
     // Source selection. Only Across is a real-time source; OIF is unverified
     // (rule #2) and anything else is unknown — both are announced, not silent.
@@ -120,9 +122,10 @@ pub async fn run(
         Utc::now().format("%Y%m%d")
     ));
     info!(source = source.name(), out = %path.display(), duration_s = ?duration,
+        prices = prices.label(), gas = gas.label(),
         "live shadow started (zero transactions)");
 
-    let router = RouterV0::new(StaticPriceFeed::reference(), StaticGasModel);
+    let router = RouterV0::new(prices, gas);
     let policy = FillPolicy::default();
 
     // Lazy sink — no confusing 0-byte file if the window is quiet (rule #7).
@@ -193,7 +196,7 @@ mod tests {
     use alloy_primitives::{address, Address, U256};
     use chrono::Duration;
     use solver_pricing::StaticGasModel;
-    use solver_router::RouterV0;
+    use solver_router::{RouterV0, StaticPriceFeed};
     use solver_types::{AssetAmount, IntentId, SettlementType, Source, TokenRef, TxRef};
 
     const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -244,7 +247,8 @@ mod tests {
             // Backtest path (its real aggregator).
             let bt = solver_backtest::compute(
                 std::slice::from_ref(intent),
-                StaticPriceFeed::reference(),
+                &StaticPriceFeed::reference(),
+                StaticGasModel,
                 policy,
             )
             .await;

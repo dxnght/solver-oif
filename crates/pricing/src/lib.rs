@@ -12,7 +12,7 @@ mod fee_history_gas;
 mod gas;
 mod offline;
 
-pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GAS_RPC_CHAINS};
+pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GasSource, GAS_RPC_CHAINS};
 pub use gas::{GasModel, StaticGasModel};
 pub use offline::OfflineIdentityPricer;
 

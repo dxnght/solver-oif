@@ -19,7 +19,8 @@ pub use route_summary::RouteSummary;
 use std::path::Path;
 
 use anyhow::Result;
-use solver_router::StaticPriceFeed;
+use solver_pricing::GasSource;
+use solver_router::PriceSource;
 use solver_types::FillPolicy;
 
 /// One-line-able outcome of a run, for the CLI to echo.
@@ -30,12 +31,19 @@ pub struct RunSummary {
     pub out_dir: String,
 }
 
-/// Load `data_dir`, run the backtest with the Phase-0 static feed + default
-/// [`FillPolicy`], write the report into `out_dir`, and return a summary.
-/// An empty data dir is not an error — it produces a loud "0 intents" report.
-pub async fn run(data_dir: &Path, out_dir: &Path) -> Result<RunSummary> {
+/// Load `data_dir`, run the backtest with the given price/gas sources + default
+/// [`FillPolicy`], write the report into `out_dir`, and return a summary. The
+/// default (static/static) run is byte-deterministic; `--live-*` swaps in the
+/// live sources (the CLI builds them). An empty data dir is not an error — it
+/// produces a loud "0 intents" report.
+pub async fn run(
+    data_dir: &Path,
+    out_dir: &Path,
+    prices: &PriceSource,
+    gas: GasSource,
+) -> Result<RunSummary> {
     let (intents, load) = load_intents(data_dir)?;
-    let out = compute(&intents, StaticPriceFeed::reference(), FillPolicy::default()).await;
+    let out = compute(&intents, prices, gas, FillPolicy::default()).await;
     report::write_report(out_dir, &load, &out)?;
     Ok(RunSummary {
         load,

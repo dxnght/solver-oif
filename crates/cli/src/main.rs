@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use solver_ingest::{AcrossIngest, AcrossIngestConfig, UniswapXIngest, UniswapXIngestConfig};
+use solver_pricing::{FeeHistoryGasModel, GasSource, StaticGasModel};
+use solver_router::{LivePriceFeed, PriceSource, StaticPriceFeed};
 use solver_types::ChainId;
 
 /// Default on-disk locations per source.
@@ -42,6 +44,18 @@ enum Command {
         /// Output directory for the report.
         #[arg(long, default_value = "reports/run")]
         out_dir: String,
+        /// Price the long-tail via live CoinGecko (by contract address) instead
+        /// of the static feed. Default off (deterministic CI).
+        #[arg(long)]
+        live_prices: bool,
+        /// Use live `eth_feeHistory` gas instead of the static per-chain
+        /// estimate (needs `ACROSS_RPC_<CHAIN>`). Default off.
+        #[arg(long)]
+        live_gas: bool,
+        /// Force static prices/gas for a byte-deterministic run — overrides
+        /// `--live-prices`/`--live-gas` (so a repro never touches the network).
+        #[arg(long)]
+        reproducible: bool,
     },
     /// Phase-1 live shadow: subscribe to real-time intents and log shadow
     /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` per chain.
@@ -58,6 +72,18 @@ enum Command {
         /// Output directory for the decisions JSONL.
         #[arg(long, default_value = live::LIVE_OUT_DIR)]
         out: String,
+        /// Price the long-tail via live CoinGecko instead of the static feed —
+        /// the cross-chain stream is mostly long-tail, so without this it is
+        /// nearly all `price_unknown`. Default off.
+        #[arg(long)]
+        live_prices: bool,
+        /// Use live `eth_feeHistory` gas (needs `ACROSS_RPC_<CHAIN>`) instead of
+        /// the static per-chain estimate. Default off.
+        #[arg(long)]
+        live_gas: bool,
+        /// Force static prices/gas (overrides `--live-prices`/`--live-gas`).
+        #[arg(long)]
+        reproducible: bool,
     },
     /// Preflight: print what is configured and which chains/sources will
     /// actually produce data, before any run.
@@ -87,6 +113,23 @@ fn parse_chains(s: &str) -> anyhow::Result<Vec<ChainId>> {
     Ok(out)
 }
 
+/// Build the price + gas sources from the CLI flags. `--reproducible` forces
+/// static (deterministic) regardless of the live flags, so a CI/repro run never
+/// reaches the network even if `--live-*` is also passed.
+fn build_pricing(live_prices: bool, live_gas: bool, reproducible: bool) -> (PriceSource, GasSource) {
+    let prices = if live_prices && !reproducible {
+        PriceSource::Live(LivePriceFeed::from_env())
+    } else {
+        PriceSource::Static(StaticPriceFeed::reference())
+    };
+    let gas = if live_gas && !reproducible {
+        GasSource::Live(FeeHistoryGasModel::from_env())
+    } else {
+        GasSource::Static(StaticGasModel)
+    };
+    (prices, gas)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -100,15 +143,19 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
-        Command::Backtest { out_dir } => run_backtest(&out_dir).await,
-        Command::Live { chains, sources, duration, out } => {
+        Command::Backtest { out_dir, live_prices, live_gas, reproducible } => {
+            let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
+            run_backtest(&out_dir, prices, gas).await
+        }
+        Command::Live { chains, sources, duration, out, live_prices, live_gas, reproducible } => {
             let chains = parse_chains(&chains)?;
             let sources: Vec<String> = sources
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            live::run(chains, sources, duration, &out).await
+            let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
+            live::run(chains, sources, duration, &out, prices, gas).await
         }
         Command::Doctor { suggest } => {
             run_doctor(suggest).await;
@@ -173,11 +220,15 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
     }
 }
 
-async fn run_backtest(out_dir: &str) -> anyhow::Result<()> {
-    let summary = solver_backtest::run(std::path::Path::new(DATA_DIR), std::path::Path::new(out_dir)).await?;
+async fn run_backtest(out_dir: &str, prices: PriceSource, gas: GasSource) -> anyhow::Result<()> {
+    let (prices_label, gas_label) = (prices.label(), gas.label());
+    let summary =
+        solver_backtest::run(std::path::Path::new(DATA_DIR), std::path::Path::new(out_dir), &prices, gas)
+            .await?;
     let m = &summary.metrics;
     println!(
-        "backtest: loaded {} intents ({} files), quoted {}, would_fill {} → {}/",
+        "backtest: loaded {} intents ({} files), quoted {}, would_fill {} \
+         [prices={prices_label} gas={gas_label}] → {}/",
         summary.load.kept, summary.load.files, m.quoted, m.would_fill, summary.out_dir
     );
     match m.would_fill_precision() {

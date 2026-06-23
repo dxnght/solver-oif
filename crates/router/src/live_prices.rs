@@ -172,6 +172,34 @@ impl LivePriceFeed {
     }
 }
 
+/// Runtime selection between the static and live price feeds. Lets the Router
+/// (and the backtest/live loops) hold **one** concrete `PriceFeed` type whether
+/// or not `--live-prices` is set — an enum dispatch, no trait objects and no
+/// 2×N monomorphization of the decision loop.
+pub enum PriceSource {
+    Static(StaticPriceFeed),
+    Live(LivePriceFeed),
+}
+
+impl PriceSource {
+    /// Short label for the `prices=…` summary line.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PriceSource::Static(_) => "static",
+            PriceSource::Live(_) => "live-coingecko",
+        }
+    }
+}
+
+impl PriceFeed for PriceSource {
+    fn usd_price(&self, token: TokenRef) -> Option<f64> {
+        match self {
+            PriceSource::Static(f) => f.usd_price(token),
+            PriceSource::Live(f) => f.usd_price(token),
+        }
+    }
+}
+
 impl PriceFeed for LivePriceFeed {
     fn usd_price(&self, token: TokenRef) -> Option<f64> {
         if let Some(v) = self.cached(token) {

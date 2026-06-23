@@ -117,6 +117,34 @@ impl FeeHistoryGasModel {
     }
 }
 
+/// Runtime selection between static and live gas. The `GasModel` counterpart of
+/// `PriceSource`: one concrete type for the Router whether or not `--live-gas`
+/// is set, no trait objects.
+pub enum GasSource {
+    Static(StaticGasModel),
+    Live(FeeHistoryGasModel),
+}
+
+impl GasSource {
+    /// Short label for the `gas=…` summary line.
+    pub fn label(&self) -> &'static str {
+        match self {
+            GasSource::Static(_) => "static",
+            GasSource::Live(_) => "live-feehistory",
+        }
+    }
+}
+
+#[async_trait]
+impl GasModel for GasSource {
+    async fn fill_gas_native(&self, chain: ChainId) -> U256 {
+        match self {
+            GasSource::Static(g) => g.fill_gas_native(chain).await,
+            GasSource::Live(g) => g.fill_gas_native(chain).await,
+        }
+    }
+}
+
 #[async_trait]
 impl GasModel for FeeHistoryGasModel {
     async fn fill_gas_native(&self, chain: ChainId) -> U256 {
