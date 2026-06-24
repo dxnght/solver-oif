@@ -52,6 +52,11 @@ pub struct DecisionRecord {
     pub expected_profit_usd: Option<f64>,
     pub confidence: Option<f64>,
     pub gas_usd: Option<f64>,
+    /// Which model produced `gas_usd` — `etherscan`/`feehistory`/`static`. Lets
+    /// a reader tell a live gas reading from a static fallback. `#[serde(default)]`
+    /// so records written before this field existed still deserialize.
+    #[serde(default)]
+    pub gas_source: Option<String>,
     /// Clickable explorer link to the backing tx (origin deposit), when known.
     pub verify_url: Option<String>,
     pub retrospective: bool,
@@ -71,6 +76,7 @@ impl DecisionRecord {
             expected_profit_usd: q.map(|q| q.expected_profit_usd),
             confidence: q.map(|q| q.confidence),
             gas_usd: q.map(|q| q.gas_usd),
+            gas_source: q.map(|q| q.gas_source.as_str().to_string()),
             verify_url: intent.verify_url(),
             retrospective: false,
         }

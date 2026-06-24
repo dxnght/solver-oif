@@ -23,14 +23,10 @@ use std::time::{Duration, Instant};
 use alloy_primitives::U256;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use solver_types::ChainId;
+use solver_types::{ChainId, GasOrigin};
 use tracing::warn;
 
-use crate::gas::{GasModel, StaticGasModel};
-
-/// Gas units for one typical fill tx. Matches the `StaticGasModel` comment
-/// (≈300k gas) so the live model changes only the *price*, not the units.
-const TYPICAL_FILL_GAS: u128 = 300_000;
+use crate::gas::{GasEstimate, GasModel, StaticGasModel, TYPICAL_FILL_GAS};
 
 /// Per-chain cache TTL. Base fees move per block (~2s on an L2); 12s is fresh
 /// enough to track them while keeping a thousand-intent backtest off the RPC.
@@ -121,6 +117,28 @@ impl FeeHistoryGasModel {
             .with_context(|| format!("parsing eth_feeHistory for {chain}"))?;
         Ok(U256::from(estimate_fill_wei(base_fee, priority)))
     }
+
+    /// Live-only estimate: `Some(wei)` from `eth_feeHistory`, or `None` if no
+    /// RPC is configured for `chain` or the call fails. Successful reads are
+    /// cached (12s TTL). The ladder uses this to decide whether to fall through;
+    /// standalone use goes through [`GasModel::fill_gas`], which adds the loud
+    /// static fallback. No fabricated value on failure (CLAUDE.md #2) — `None`.
+    pub async fn try_fill_gas(&self, chain: ChainId) -> Option<U256> {
+        if let Some(v) = self.cached(chain) {
+            return Some(v);
+        }
+        let url = self.rpc_urls.get(&chain)?; // no RPC for this chain → None
+        match self.fetch_estimate(url, chain).await {
+            Ok(wei) => {
+                self.store(chain, wei);
+                Some(wei)
+            }
+            Err(e) => {
+                warn!(%chain, error = %e, "live gas fetch failed");
+                None
+            }
+        }
+    }
 }
 
 /// Runtime selection between static and live gas. The `GasModel` counterpart of
@@ -143,35 +161,26 @@ impl GasSource {
 
 #[async_trait]
 impl GasModel for GasSource {
-    async fn fill_gas_native(&self, chain: ChainId) -> U256 {
+    async fn fill_gas(&self, chain: ChainId) -> GasEstimate {
         match self {
-            GasSource::Static(g) => g.fill_gas_native(chain).await,
-            GasSource::Live(g) => g.fill_gas_native(chain).await,
+            GasSource::Static(g) => g.fill_gas(chain).await,
+            GasSource::Live(g) => g.fill_gas(chain).await,
         }
     }
 }
 
 #[async_trait]
 impl GasModel for FeeHistoryGasModel {
-    async fn fill_gas_native(&self, chain: ChainId) -> U256 {
-        if let Some(v) = self.cached(chain) {
-            return v;
-        }
-        let value = match self.rpc_urls.get(&chain) {
+    async fn fill_gas(&self, chain: ChainId) -> GasEstimate {
+        match self.try_fill_gas(chain).await {
+            Some(native_wei) => GasEstimate { native_wei, origin: GasOrigin::FeeHistory },
             None => {
-                warn!(%chain, "no ACROSS_RPC_<CHAIN> for live gas — using static gas");
-                self.fallback.fill_gas_native(chain).await
+                // No RPC for this chain, or the fetch failed — the loud static
+                // fallback (rule #7), tagged Static so the reader sees it.
+                warn!(%chain, "no live gas (no RPC or fetch failed) — using static gas");
+                self.fallback.fill_gas(chain).await
             }
-            Some(url) => match self.fetch_estimate(url, chain).await {
-                Ok(wei) => wei,
-                Err(e) => {
-                    warn!(%chain, error = %e, "live gas fetch failed — using static gas");
-                    self.fallback.fill_gas_native(chain).await
-                }
-            },
-        };
-        self.store(chain, value);
-        value
+        }
     }
 }
 

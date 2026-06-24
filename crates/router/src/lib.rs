@@ -167,7 +167,8 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
         let revenue_usd = intent.input.to_f64() * price_in;
         let sourcing_usd = intent.output_min.to_f64() * price_out;
 
-        let gas_native = self.gas.fill_gas_native(intent.dest_chain).await;
+        let gas_est = self.gas.fill_gas(intent.dest_chain).await;
+        let gas_native = gas_est.native_wei;
         let gas_usd = AssetAmount::new(native, gas_native, 18).to_f64() * native_price;
 
         let expected_profit_usd = revenue_usd - sourcing_usd - gas_usd;
@@ -202,6 +203,7 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
             expected_profit,
             expected_profit_usd,
             gas_usd,
+            gas_source: gas_est.origin,
             confidence,
             valid_until: intent.deadline,
         }))

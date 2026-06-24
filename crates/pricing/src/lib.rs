@@ -13,7 +13,7 @@ mod gas;
 mod offline;
 
 pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GasSource, GAS_RPC_CHAINS};
-pub use gas::{GasModel, StaticGasModel};
+pub use gas::{GasEstimate, GasModel, StaticGasModel, TYPICAL_FILL_GAS};
 pub use offline::OfflineIdentityPricer;
 
 use alloy_primitives::{Address, U256};

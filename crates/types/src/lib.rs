@@ -15,5 +15,5 @@ pub use amount::{asset_class, known_decimals, AssetAmount, AssetClass, TokenRef}
 pub use chain::ChainId;
 pub use fill::{FillPolicy, FillReason};
 pub use intent::{DutchDecay, ExclusivityWindow, IntentId, NormalizedIntent, Source, TxRef};
-pub use quote::{Quote, Route, RouteHop, RouteSource, SignedAmount, Wei};
+pub use quote::{GasOrigin, Quote, Route, RouteHop, RouteSource, SignedAmount, Wei};
 pub use settlement::SettlementType;

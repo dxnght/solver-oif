@@ -245,6 +245,7 @@ mod tests {
             expected_profit_usd: None,
             confidence: None,
             gas_usd: None,
+            gas_source: None,
             verify_url: Some("https://basescan.org/tx/0xabc".into()),
             retrospective: false,
         }
