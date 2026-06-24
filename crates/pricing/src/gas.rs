@@ -45,7 +45,7 @@ impl GasModel for StaticGasModel {
             ChainId::LENS     => 30_000_000_000_000_u128,
             ChainId::SONEIUM  => 30_000_000_000_000_u128,
             ChainId::UNICHAIN => 30_000_000_000_000_u128,
-            _ => 100_000_000_000_000_u128, // conservative fallback
+            _ => 9_000_000_000_000_u128, // conservative fallback
         };
         U256::from(wei)
     }
