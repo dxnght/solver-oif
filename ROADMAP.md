@@ -89,6 +89,14 @@ optimism/base → «Free API access not supported» (парсер тестова
 драбина дає реальну (~sub-$1.5 за поточних gwei). Принагідно виправлено pre-existing fallback,
 який недооцінював газ невідомих чейнів (9e12 < усі L2 → 6e13).
 
+**HOV — Margin transparency. ✅ ЗРОБЛЕНО (HOV-1..3).** Дашборд-розширення поверх GAS: на комірці
+profit — hover-тултип `Gross − Gas = Net` (gross = `expected_profit_usd + gas_usd`, газ позначено
+джерелом), щоб модельне число було самопояснювальним; `gas_source == "static"` (статична підлога,
+нема live RPC/oracle) позначено жовтим `⚠ static` з підказкою «set ACROSS_RPC_<chain>» — stale-газ
+видно там, де він стається. HOV-1 (`gas_source` у `DecisionRecord`) уже зроблено в GAS-1.
+Нема JS-харнеса → ідентичність `gross = net + gas` застрахована Rust-тестом роутера; JS звірено
+`node --check`. Skipped-інтенти (null profit) — без тултипа.
+
 **Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)

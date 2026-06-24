@@ -100,7 +100,12 @@ static-ціни (та ще й тавтологічної: модель і realiz
    вигаданих цін; звірено наживо 2026-06-24 — eth/polygon/arbitrum покриті, optimism/base ні).
    Polygon-газ у POL (не ETH). Юніти (≈300k) не чіпали (правило #2). `doctor` показує драбину
    per-chain — **зроблено** (GAS-1..5).
-9. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+9. ✅ **HOV — margin transparency** (дашборд-розширення поверх GAS): на комірці profit —
+   hover-тултип `Gross − Gas = Net` (gross = `expected_profit_usd + gas_usd`, газ із джерелом);
+   `gas_source == "static"` позначено `⚠ static` (жовтий) + підказка «set ACROSS_RPC_<chain>»,
+   щоб stale-газ було видно. HOV-1 уже зроблено в GAS-1; ідентичність `gross = net + gas`
+   застраховано Rust-тестом (JS-харнеса нема), JS звірено `node --check` — **зроблено** (HOV-1..3).
+10. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.
