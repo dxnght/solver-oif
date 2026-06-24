@@ -91,7 +91,16 @@ static-ціни (та ще й тавтологічної: модель і realiz
    `ChainId::BSC`=56 додано), новий additive skip-reason `unsupported_chain` — відсутню ціну
    класифіковано за покриттям чейна (поза покриттям → `unsupported_chain`, покритий чейн без
    ціни токена → `price_unknown`) — **зроблено** (COV-1..3). Не чіпали не-EVM / native-gas.
-8. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+8. ✅ **GAS — real gas by default + source transparency** (вузький, correctness+legibility):
+   газова **драбина** etherscan `gasoracle` → `eth_feeHistory` → static (`LadderGasModel`);
+   `live` бере її **за замовчуванням** (`--static-gas` форсить static), `backtest` — static-дефолт
+   з опт-ін `--live-gas`, `--reproducible` → static. Кожен `GasEstimate` несе `origin` → нове
+   additive поле `gas_source` (`etherscan`/`feehistory`/`static`) у `Quote` і `DecisionRecord`.
+   Etherscan V2 `gasoracle`: `status!="1"`/нема ключа/помилка → `None`, драбина падає далі (нуль
+   вигаданих цін; звірено наживо 2026-06-24 — eth/polygon/arbitrum покриті, optimism/base ні).
+   Polygon-газ у POL (не ETH). Юніти (≈300k) не чіпали (правило #2). `doctor` показує драбину
+   per-chain — **зроблено** (GAS-1..5).
+9. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

@@ -42,6 +42,8 @@ Exit (виконано): backtest включає Across, would_fill-калібр
 live-pricing-готовність (CoinGecko ping + per-chain RPC). Наживо: `--live-prices` зняв 171
 long-tail-інтент із `price_unknown` (quoted 6597→6768); `--live-gas` здешевив L2-газ
 (would_fill 100→105). Платформ-id CoinGecko та topic0/RPC-формати звірено з живими джерелами.
+(Газ-дефолт згодом оновлено в **GAS**: `live` бере драбину за замовчуванням, `--live-gas`
+лишається опт-ін для backtest.)
 Крос-клас confidence лишається консервативно нижче порога (feed-aware тюнінг — окремо).
 
 **B4 — Live Across shadow. ✅ ЗРОБЛЕНО (LIV-1..6).**
@@ -71,6 +73,21 @@ origin→dest-маршрути / dest-чейни / reason-breakdown / live-feed 
 не-EVM або ще не змаплений L2) → `unsupported_chain` («поза досяжністю»), покритий чейн із
 незнайденим токеном → `price_unknown` («у досяжності, ціни нема»). Дашборд розрізняє їх (різні
 кольори), % класифікованого потоку зростає. Не чіпали не-EVM і native-gas-мапу (поза скоупом).
+
+**GAS — Real gas by default + source transparency. ✅ ЗРОБЛЕНО (GAS-1..5).** Вузький,
+correctness+legibility. Газ тепер **драбина** etherscan `gasoracle` → `eth_feeHistory` →
+static ([`LadderGasModel`]): `live` бере її **за замовчуванням** (лагодить «забув `--live-gas`»),
+`--static-gas` форсить static; `backtest` лишається static-дефолт (`--live-gas` вмикає драбину),
+`--reproducible` → static (детермінізм). Кожен `GasEstimate` несе `origin`
+(`etherscan`/`feehistory`/`static`) → нове additive поле `gas_source` у `Quote` і
+`DecisionRecord` (видно, якому числу вірити). Etherscan V2 `gasoracle` (той самий хост, що
+ingest): `status!="1"` (чейн без покриття плану) / нема ключа / помилка → `None`, драбина падає
+далі — ніякої вигаданої ціни. Звірено наживо 2026-06-24: ethereum/polygon/arbitrum → `status:1`,
+optimism/base → «Free API access not supported» (парсер тестовано на реальних тілах). Polygon-газ
+цінується в POL, не ETH (вже коректно; додано end-to-end-тест). `doctor` показує драбину per-chain.
+Юніти (≈300k) свідомо **не** чіпали (правило #2); `$27`-проблема Ethereum — від статичної *ціни*,
+драбина дає реальну (~sub-$1.5 за поточних gwei). Принагідно виправлено pre-existing fallback,
+який недооцінював газ невідомих чейнів (9e12 < усі L2 → 6e13).
 
 **Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 

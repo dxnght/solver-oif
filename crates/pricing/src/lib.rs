@@ -3,10 +3,12 @@
 //! The Router asks: *what would it cost to acquire `target_amount` of token Y
 //! on chain C right now?* and *what does a fill tx cost in gas?*
 //!
-//! Verified-core scope (bucket B0): **offline / static only**, so the backtest
-//! is deterministic and CI never reaches the network. Live DEX-aggregator
-//! sourcing (odos) and live gas (`eth_feeHistory`) return in later buckets,
-//! behind a flag, default off — never as a horizontal sweep (CLAUDE.md rule #5).
+//! Gas: a ladder (etherscan `gasoracle` → `eth_feeHistory` → static;
+//! [`LadderGasModel`]) that `live` uses by **default** and `backtest` opts into
+//! with `--live-gas`; `--reproducible` forces the static floor so CI stays
+//! deterministic. Each estimate carries its [`GasEstimate::origin`]. Live
+//! DEX-aggregator sourcing (odos) is still a later bucket, behind a flag —
+//! never a horizontal sweep (CLAUDE.md rule #5).
 
 mod etherscan_gas;
 mod fee_history_gas;

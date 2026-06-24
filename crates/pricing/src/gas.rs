@@ -1,10 +1,11 @@
 //! Gas-cost model.
 //!
-//! Phase 0 uses **static per-chain estimates** of (gas_used × gas_price)
-//! for a typical fill transaction (≈300k gas) at the chain's median price
-//! over a recent window. This is a coarse model — sufficient to rank
-//! routes, not to size individual trades. Live `eth_feeHistory` gas is a
-//! later bucket (B3), behind a flag, default off.
+//! [`StaticGasModel`] here is **static per-chain estimates** of
+//! (gas_used × gas_price) for a typical fill (≈300k gas) at a recent median
+//! price — coarse, enough to rank routes. It is now the *floor* of the gas
+//! ladder (etherscan → feeHistory → static; see `ladder_gas`), which `live`
+//! uses by default and `backtest` opts into with `--live-gas`. Live models
+//! vary only the *price*; the units stay [`TYPICAL_FILL_GAS`].
 
 use alloy_primitives::U256;
 use async_trait::async_trait;
