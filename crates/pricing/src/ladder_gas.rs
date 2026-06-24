@@ -64,6 +64,36 @@ impl GasModel for LadderGasModel {
     }
 }
 
+/// Runtime selection between static gas and the live ladder. The `GasModel`
+/// counterpart of `PriceSource`: one concrete type for the Router whether or
+/// not live gas is enabled, no trait objects.
+pub enum GasSource {
+    Static(StaticGasModel),
+    /// Boxed: the ladder nests three models (two with an HTTP client + cache),
+    /// so it dwarfs the unit `Static` variant.
+    Ladder(Box<LadderGasModel>),
+}
+
+impl GasSource {
+    /// Short label for the `gas=…` summary line.
+    pub fn label(&self) -> &'static str {
+        match self {
+            GasSource::Static(_) => "static",
+            GasSource::Ladder(_) => "ladder (etherscan→feeHistory→static)",
+        }
+    }
+}
+
+#[async_trait]
+impl GasModel for GasSource {
+    async fn fill_gas(&self, chain: ChainId) -> GasEstimate {
+        match self {
+            GasSource::Static(g) => g.fill_gas(chain).await,
+            GasSource::Ladder(g) => g.fill_gas(chain).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +133,21 @@ mod tests {
             assert_eq!(est.origin, GasOrigin::Static, "no-creds ladder must hit static for {chain}");
             assert_eq!(est.native_wei, stat.fill_gas(chain).await.native_wei);
         }
+    }
+
+    /// `GasSource` is a pure dispatch: a no-credentials ladder equals static,
+    /// and the labels are the stable `gas=…` summary strings.
+    #[tokio::test]
+    async fn gas_source_dispatch_and_labels() {
+        let ladder = GasSource::Ladder(Box::new(LadderGasModel::new(
+            EtherscanGasModel::new(None),
+            Some(FeeHistoryGasModel::new(HashMap::new())),
+        )));
+        let stat = GasSource::Static(StaticGasModel);
+        for chain in [ChainId::BASE, ChainId::ARBITRUM] {
+            assert_eq!(ladder.fill_gas_native(chain).await, stat.fill_gas_native(chain).await);
+        }
+        assert_eq!(stat.label(), "static");
+        assert_eq!(ladder.label(), "ladder (etherscan→feeHistory→static)");
     }
 }

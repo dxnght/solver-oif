@@ -363,29 +363,42 @@ pub fn render(r: &DoctorReport) -> String {
         let _ = writeln!(s);
     }
 
-    // Live pricing readiness (LP-5): CoinGecko reachability (--live-prices) and
-    // per-chain ACROSS_RPC presence (--live-gas). Both degrade to static, so a
-    // run is legible about whether the LIVE numbers will actually be available.
+    // Live pricing/gas readiness: CoinGecko (--live-prices) and the gas ladder
+    // (etherscan → feeHistory → static). `live` defaults to the ladder; each
+    // rung degrades to the next, so a run is legible about which numbers are
+    // live. Etherscan's per-chain coverage is plan-dependent, so it is resolved
+    // at runtime — here we only report whether the key/RPC inputs are present.
     if r.coingecko.is_some() || !r.across_rpc_env.is_empty() {
-        let _ = writeln!(s, "Live pricing — readiness (--live-prices / --live-gas):");
+        let _ = writeln!(s, "Live pricing — readiness:");
         if let Some(cg) = &r.coingecko {
             let note = match cg {
                 CoinGeckoStatus::Error(e) => format!("  ({e})"),
                 CoinGeckoStatus::Reachable => String::new(),
             };
-            let _ = writeln!(s, "  coingecko   {:<10}  --live-prices source{}", cg.label(), note);
+            let _ = writeln!(s, "  coingecko   {:<11}  --live-prices source{}", cg.label(), note);
         }
+        let key = r.etherscan_key_present;
+        let _ = writeln!(
+            s,
+            "  gas ladder  {}  etherscan → feeHistory → static \
+             (live by default on `live`; --static-gas forces static)",
+            if key { "KEY-SET" } else { "NO-KEY " },
+        );
         for (c, present) in &r.across_rpc_env {
             let _ = writeln!(
                 s,
-                "  {:<10}  {:<10}  live gas via ACROSS_RPC_{}",
+                "    {:<10}  etherscan{} → {} → static",
                 c.name(),
-                if *present { "RPC-SET" } else { "RPC-MISSING" },
-                c.name().to_uppercase(),
+                if key { "" } else { "(off)" },
+                if *present { "feeHistory(RPC-SET)" } else { "feeHistory(RPC-MISSING)" },
             );
         }
         let (n, m) = r.across_rpc_ratio();
-        let _ = writeln!(s, "  → Live gas on {n}/{m} configured chains (others use static gas).");
+        let _ = writeln!(
+            s,
+            "  → feeHistory on {n}/{m} chains; etherscan {}; static floor always.",
+            if key { "key set (coverage resolved live)" } else { "disabled (no ETHERSCAN_API_KEY)" },
+        );
         let _ = writeln!(s);
     }
 
@@ -407,7 +420,11 @@ pub fn render(r: &DoctorReport) -> String {
         Some(CoinGeckoStatus::Error(_)) => "unreachable",
         None => "not-probed",
     };
-    let _ = writeln!(s, "Live pricing: coingecko={cg}, across-rpc={rpc_n}/{rpc_m} set (else static).");
+    let key = if r.etherscan_key_present { "key" } else { "no-key" };
+    let _ = writeln!(
+        s,
+        "Live pricing: coingecko={cg}; gas ladder etherscan[{key}]→feeHistory {rpc_n}/{rpc_m}→static."
+    );
 
     // Always show the next step (scriptable form is `--suggest`).
     let _ = writeln!(s, "\nNext (no key needed):\n    {SUGGEST_NO_KEY}");
@@ -603,9 +620,15 @@ mod tests {
         let out = render(&r);
         assert!(out.contains("Live pricing — readiness"));
         assert!(out.contains("REACHABLE"));
-        assert!(out.contains("RPC-SET"), "base rpc set");
+        assert!(out.contains("RPC-SET"), "base rpc set (feeHistory rung)");
         assert!(out.contains("RPC-MISSING"), "arb/opt rpc missing");
-        assert!(out.contains("Live gas on 1/3 configured chains"));
-        assert!(out.contains("Live pricing: coingecko=reachable, across-rpc=1/3 set"));
+        // Ladder is reported, and this env has no ETHERSCAN_API_KEY.
+        assert!(out.contains("gas ladder"), "gas ladder block shown");
+        assert!(out.contains("NO-KEY"), "no etherscan key in this env");
+        assert!(out.contains("feeHistory on 1/3 chains"));
+        assert!(
+            out.contains("gas ladder etherscan[no-key]→feeHistory 1/3→static"),
+            "one-line gas summary"
+        );
     }
 }

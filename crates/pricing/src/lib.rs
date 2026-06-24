@@ -15,9 +15,9 @@ mod ladder_gas;
 mod offline;
 
 pub use etherscan_gas::EtherscanGasModel;
-pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GasSource, GAS_RPC_CHAINS};
+pub use fee_history_gas::{across_rpc_var, FeeHistoryGasModel, GAS_RPC_CHAINS};
 pub use gas::{GasEstimate, GasModel, StaticGasModel, TYPICAL_FILL_GAS};
-pub use ladder_gas::LadderGasModel;
+pub use ladder_gas::{GasSource, LadderGasModel};
 pub use offline::OfflineIdentityPricer;
 
 use alloy_primitives::{Address, U256};

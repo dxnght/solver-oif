@@ -141,34 +141,6 @@ impl FeeHistoryGasModel {
     }
 }
 
-/// Runtime selection between static and live gas. The `GasModel` counterpart of
-/// `PriceSource`: one concrete type for the Router whether or not `--live-gas`
-/// is set, no trait objects.
-pub enum GasSource {
-    Static(StaticGasModel),
-    Live(FeeHistoryGasModel),
-}
-
-impl GasSource {
-    /// Short label for the `gas=…` summary line.
-    pub fn label(&self) -> &'static str {
-        match self {
-            GasSource::Static(_) => "static",
-            GasSource::Live(_) => "live-feehistory",
-        }
-    }
-}
-
-#[async_trait]
-impl GasModel for GasSource {
-    async fn fill_gas(&self, chain: ChainId) -> GasEstimate {
-        match self {
-            GasSource::Static(g) => g.fill_gas(chain).await,
-            GasSource::Live(g) => g.fill_gas(chain).await,
-        }
-    }
-}
-
 #[async_trait]
 impl GasModel for FeeHistoryGasModel {
     async fn fill_gas(&self, chain: ChainId) -> GasEstimate {
@@ -338,18 +310,5 @@ mod tests {
                 "no-RPC live gas must equal static for {chain}"
             );
         }
-    }
-
-    /// LP-6: `GasSource` is a pure dispatch — Live (no RPC → static fallback)
-    /// equals Static, and the labels are the stable summary strings.
-    #[tokio::test]
-    async fn gas_source_dispatch() {
-        let live = GasSource::Live(FeeHistoryGasModel::new(HashMap::new()));
-        let stat = GasSource::Static(StaticGasModel);
-        for chain in [ChainId::BASE, ChainId::ARBITRUM] {
-            assert_eq!(live.fill_gas_native(chain).await, stat.fill_gas_native(chain).await);
-        }
-        assert_eq!(stat.label(), "static");
-        assert_eq!(live.label(), "live-feehistory");
     }
 }

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use solver_ingest::{AcrossIngest, AcrossIngestConfig, UniswapXIngest, UniswapXIngestConfig};
-use solver_pricing::{FeeHistoryGasModel, GasSource, StaticGasModel};
+use solver_pricing::{GasSource, LadderGasModel, StaticGasModel};
 use solver_router::{LivePriceFeed, PriceSource, StaticPriceFeed};
 use solver_types::ChainId;
 
@@ -82,11 +82,11 @@ enum Command {
         /// nearly all `price_unknown`. Default off.
         #[arg(long)]
         live_prices: bool,
-        /// Use live `eth_feeHistory` gas (needs `ACROSS_RPC_<CHAIN>`) instead of
-        /// the static per-chain estimate. Default off.
+        /// Force static per-chain gas instead of the **default** live ladder
+        /// (etherscan→feeHistory→static). For a deterministic/offline live run.
         #[arg(long)]
-        live_gas: bool,
-        /// Force static prices/gas (overrides `--live-prices`/`--live-gas`).
+        static_gas: bool,
+        /// Force static prices/gas (overrides `--live-prices`, forces static gas).
         #[arg(long)]
         reproducible: bool,
     },
@@ -118,17 +118,17 @@ fn parse_chains(s: &str) -> anyhow::Result<Vec<ChainId>> {
     Ok(out)
 }
 
-/// Build the price + gas sources from the CLI flags. `--reproducible` forces
-/// static (deterministic) regardless of the live flags, so a CI/repro run never
-/// reaches the network even if `--live-*` is also passed.
-fn build_pricing(live_prices: bool, live_gas: bool, reproducible: bool) -> (PriceSource, GasSource) {
-    let prices = if live_prices && !reproducible {
+/// Build the price + gas sources. Callers pass already-resolved booleans —
+/// each command applies its own default and folds in the `--reproducible`
+/// override — so a CI/repro run never reaches the network.
+fn build_pricing(live_prices: bool, ladder_gas: bool) -> (PriceSource, GasSource) {
+    let prices = if live_prices {
         PriceSource::Live(LivePriceFeed::from_env())
     } else {
         PriceSource::Static(StaticPriceFeed::reference())
     };
-    let gas = if live_gas && !reproducible {
-        GasSource::Live(FeeHistoryGasModel::from_env())
+    let gas = if ladder_gas {
+        GasSource::Ladder(Box::new(LadderGasModel::from_env()))
     } else {
         GasSource::Static(StaticGasModel)
     };
@@ -149,7 +149,10 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
         Command::Backtest { out_dir, live_prices, live_gas, reproducible } => {
-            let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
+            // Backtest defaults to static gas (deterministic CI); --live-gas
+            // opts into the ladder, --reproducible forces static.
+            let (prices, gas) =
+                build_pricing(live_prices && !reproducible, live_gas && !reproducible);
             run_backtest(&out_dir, prices, gas).await
         }
         Command::Live {
@@ -159,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
             out,
             dashboard_port,
             live_prices,
-            live_gas,
+            static_gas,
             reproducible,
         } => {
             let chains = parse_chains(&chains)?;
@@ -168,7 +171,11 @@ async fn main() -> anyhow::Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let (prices, gas) = build_pricing(live_prices, live_gas, reproducible);
+            // Live defaults to the real-gas ladder (so a run is never silently
+            // on static because someone forgot a flag); --static-gas or
+            // --reproducible forces static.
+            let (prices, gas) =
+                build_pricing(live_prices && !reproducible, !static_gas && !reproducible);
             live::run(chains, sources, duration, &out, dashboard_port, prices, gas).await
         }
         Command::Doctor { suggest } => {
