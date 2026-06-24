@@ -331,7 +331,7 @@ mod tests {
     use chrono::Duration;
     use solver_pricing::StaticGasModel;
     use solver_types::{
-        FillPolicy, IntentId, SettlementType, Source,
+        FillPolicy, GasOrigin, IntentId, SettlementType, Source,
     };
 
     const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -391,6 +391,35 @@ mod tests {
         assert!(q.expected_profit_usd > 1.5);
         assert_eq!(q.confidence, CONF_SAME_CLASS);
         assert!(FillPolicy::default().is_fill(q));
+    }
+
+    /// GAS-5: a Polygon-destination fill prices gas in the chain's NATIVE token
+    /// (POL/MATIC, $0.50), not ETH ($3000). The router asks the feed for the
+    /// dest chain's native token, so a wrong-token bug would value Polygon gas
+    /// 6000× too high. Expected value derived independently from the static gas
+    /// units × MATIC price, then asserted far from the ETH-priced figure. Also
+    /// checks the GAS-1 source tag rides through to the Quote.
+    #[tokio::test]
+    async fn polygon_gas_priced_in_pol_not_eth() {
+        // USDC (stable, $1) in on Base → USDC out on Polygon, so both sides
+        // price and the quote turns on the dest-chain native gas valuation.
+        let i = intent(ChainId::BASE, ChainId::POLYGON, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("should quote");
+
+        let native = TokenRef::new(ChainId::POLYGON, Address::ZERO);
+        let gas_native = StaticGasModel.fill_gas(ChainId::POLYGON).await.native_wei;
+        let gas_matic = AssetAmount::new(native, gas_native, 18).to_f64();
+        let expected_pol = gas_matic * 0.50; // priced in POL
+        let wrong_eth = gas_matic * 3000.0; // the bug we guard against
+
+        assert!((q.gas_usd - expected_pol).abs() < 1e-9, "gas {} ≠ POL-priced {expected_pol}", q.gas_usd);
+        assert!(
+            (q.gas_usd - wrong_eth).abs() > 1.0,
+            "gas {} is ETH-priced — Polygon native must be POL",
+            q.gas_usd
+        );
+        // Static feed ⇒ static gas model ⇒ the source tag is Static.
+        assert_eq!(q.gas_source, GasOrigin::Static);
     }
 
     /// Output worth more than input → negative profit → the default policy

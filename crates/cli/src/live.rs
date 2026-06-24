@@ -326,6 +326,9 @@ mod tests {
                 && rec.gas_usd.is_some(),
             "quoted ⇒ numbers present"
         );
+        // GAS-1: the gas source tag rides into the record. This router uses the
+        // static gas model, so the quoted row is tagged "static".
+        assert_eq!(rec.gas_source.as_deref(), Some("static"), "quoted ⇒ gas_source present");
 
         // Durable JSONL: serialize → deserialize → identical key fields.
         let line = serde_json::to_string(&rec).unwrap();
@@ -336,5 +339,6 @@ mod tests {
         assert_eq!(back.retrospective, rec.retrospective);
         assert_eq!(back.verify_url, rec.verify_url);
         assert_eq!(back.expected_profit_usd, rec.expected_profit_usd);
+        assert_eq!(back.gas_source, rec.gas_source);
     }
 }
