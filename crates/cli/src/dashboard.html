@@ -83,6 +83,8 @@
   tr.wf { background: rgba(63,185,80,.08); }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.wf { background: var(--fill); color: #04130a; }
+  .stale { color: var(--excl); font-size: 11px; font-weight: 600; cursor: help; }
+  td[title] { cursor: help; }
   a { color: var(--margin); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .empty { color: var(--dim); padding: 8px; }
@@ -244,6 +246,31 @@ function fmtProfit(p) {
   return `<span style="color:${c}">$${v.toFixed(2)}</span>`;
 }
 
+// HOV-2: the profit <td> with a Gross − Gas = Net hover tooltip and a
+// stale-static-gas flag. INVARIANT: gross = net + gas, where net is THIS
+// record's expected_profit_usd and gas its gas_usd — both off the same `rec`
+// (DFIX-1), since the router defines net = gross − gas. A skipped intent
+// (expected_profit_usd null → price_unknown / unsupported_chain) gets the bare
+// "—" and no tooltip. gas_source === "static" means the gas number is the
+// static floor (no live RPC/oracle) and may be stale — flag it loudly.
+function profitCell(rec) {
+  const p = rec.expected_profit_usd;
+  if (p === null || p === undefined) return `<td>${fmtProfit(p)}</td>`;
+  const net = Number(p);
+  const gas = Number(rec.gas_usd) || 0;
+  const gross = net + gas;
+  const src = rec.gas_source || "?";
+  const stale = src === "static";
+  let tip =
+    `Gross spread  $${gross.toFixed(2)}\n` +
+    `− Gas         $${gas.toFixed(2)}  [${src}]\n` +
+    `──────────────────────\n` +
+    `= Net         $${net.toFixed(2)}`;
+  if (stale) tip += `\n⚠ static estimate — may be stale; set ACROSS_RPC_<chain>`;
+  const flag = stale ? ' <span class="stale">⚠ static</span>' : "";
+  return `<td title="${esc(tip)}">${fmtProfit(p)}${flag}</td>`;
+}
+
 // INVARIANT: every <td> in a row comes from the same record (DFIX-1).
 // One DecisionRecord in, the whole <tr> out. Route, reason, profit and the
 // verify link are all read off the same `rec`, so a row can never splice a
@@ -263,7 +290,7 @@ function feedRow(rec) {
       <td style="color:var(--dim)">${esc(fmtTime(rec))}</td>
       <td class="route">${esc(pair)}</td>
       <td class="reason">${reasonCell}</td>
-      <td>${fmtProfit(rec.expected_profit_usd)}</td>
+      ${profitCell(rec)}
       <td>${link}</td>
     </tr>`;
 }
