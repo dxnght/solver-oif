@@ -422,6 +422,26 @@ mod tests {
         assert_eq!(q.gas_source, GasOrigin::Static);
     }
 
+    /// HOV-3: the dashboard's profit tooltip reconstructs the gross spread as
+    /// `net + gas` (net = expected_profit_usd, gas = gas_usd). Guard that
+    /// identity against the router's own math — for a 1000→998 USDC route the
+    /// gross spread is a hand-computed $2.00 (revenue $1·1000 − sourcing
+    /// $1·998), so net + gas must equal it, whatever the gas number is. If the
+    /// router ever stopped subtracting gas to get net, the tooltip would lie.
+    #[tokio::test]
+    async fn profit_gross_equals_net_plus_gas() {
+        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("should quote");
+        let gross = 1_000.0 - 998.0; // hand-computed, independent of the quote
+        assert!(q.gas_usd > 0.0, "a real fill costs gas");
+        assert!(
+            (q.expected_profit_usd + q.gas_usd - gross).abs() < 1e-9,
+            "net {} + gas {} must equal gross {gross}",
+            q.expected_profit_usd,
+            q.gas_usd
+        );
+    }
+
     /// Output worth more than input → negative profit → the default policy
     /// declines (Unprofitable). The Router still *quotes* (measuring the
     /// route's economics is its job); the FillPolicy owns the fill decision.
