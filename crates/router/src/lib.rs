@@ -33,8 +33,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use solver_pricing::GasModel;
 use solver_types::{
-    asset_class, AssetAmount, AssetClass, ChainId, DutchDecay, FillPolicy, FillReason,
-    NormalizedIntent, Quote, Route, RouteHop, RouteSource, SignedAmount, TokenRef,
+    asset_class, checked_decimals, AssetAmount, AssetClass, ChainId, DutchDecay, FillPolicy,
+    FillReason, NormalizedIntent, Quote, Route, RouteHop, RouteSource, SignedAmount, TokenRef,
 };
 
 /// Confidence in a same-class route (stable→stable): both legs are valued at
@@ -51,6 +51,21 @@ pub const CONF_SAME_CLASS: f64 = 0.90;
 /// lands (bucket B3 revisits this number, feed-aware). This is the explicit
 /// removal of false confidence (CORE-5), not a tuned threshold-dodge.
 pub const CONF_CROSS_CLASS: f64 = 0.40;
+
+/// Confidence stamped on a quote whose modeled margin is implausibly large for
+/// the protocol (the sanity backstop in [`RouterV0::quote`]). Below the default
+/// fill threshold (0.50) so it resolves to `suspect` and never counts as
+/// would_fill — a pricing artifact made **visible** (a low-confidence suspect
+/// row), not silently dropped (CLAUDE.md rule #10).
+pub const CONF_IMPLAUSIBLE: f64 = 0.20;
+
+/// Upper bound on a *plausible* Across margin as a fraction of input notional.
+/// A relayer's take is the deposit's fixed fee — 0.1–0.3% in practice; 5% is
+/// orders of magnitude above any of them, so a modeled profit exceeding it is a
+/// pricing bug (a mis-scaled leg, a stale cross-class price), not an edge. The
+/// backstop demotes such a quote to [`CONF_IMPLAUSIBLE`]. This is a domain
+/// constraint, not a tuned threshold-dodge: it only ever fires on garbage.
+const MAX_PLAUSIBLE_MARGIN_FRAC: f64 = 0.05;
 
 /// Why the Router declined to quote an intent. Serialized into the
 /// decisions JSONL `reason` field downstream — **do not rename** the strings.
@@ -73,6 +88,12 @@ pub enum SkipReason {
     /// dashboard shows this as "out of reach" vs `price_unknown`'s "reachable
     /// but unpriced" (B6/COV-2). Additive — appended, never a rename.
     UnsupportedChain,
+    /// A side's token has a USD price but **unknown decimals** — we recognize
+    /// neither its scale nor a safe default, so converting its raw amount to
+    /// whole tokens would fabricate it (a wrong scale underflows the leg to ~0
+    /// and inflates profit to the full notional). We skip rather than guess
+    /// (CLAUDE.md rule #2). Additive — appended, never a rename.
+    UnknownDecimals,
 }
 
 impl SkipReason {
@@ -83,6 +104,7 @@ impl SkipReason {
             SkipReason::ExclusiveToOther => "exclusive_to_other",
             SkipReason::DustAmount => "dust_amount",
             SkipReason::UnsupportedChain => "unsupported_chain",
+            SkipReason::UnknownDecimals => "unknown_decimals",
         }
     }
 
@@ -164,8 +186,25 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
             None => return QuoteOutcome::Skipped(SkipReason::for_missing_price(intent.dest_chain)),
         };
 
-        let revenue_usd = intent.input.to_f64() * price_in;
-        let sourcing_usd = intent.output_min.to_f64() * price_out;
+        // Decimals must be KNOWN to value a leg honestly. The stored
+        // `AssetAmount.decimals` is an ingest convenience that falls back to the
+        // ERC-20 default of 18; trusting it silently fabricates the amount when
+        // wrong — a 6-decimal token (e.g. bridged USDC.e at 0x2791…4174, absent
+        // from the stable table) read as 18 underflows to ~0, zeroing its USD
+        // leg and inflating profit to the full input notional (the bug behind
+        // absurd would_fill rows). Re-derive from recognized tokens and skip
+        // rather than guess (CLAUDE.md rule #2).
+        let in_dec = match checked_decimals(in_tok) {
+            Some(d) => d,
+            None => return QuoteOutcome::Skipped(SkipReason::UnknownDecimals),
+        };
+        let out_dec = match checked_decimals(out_tok) {
+            Some(d) => d,
+            None => return QuoteOutcome::Skipped(SkipReason::UnknownDecimals),
+        };
+        let revenue_usd = AssetAmount::new(in_tok, intent.input.amount, in_dec).to_f64() * price_in;
+        let sourcing_usd =
+            AssetAmount::new(out_tok, intent.output_min.amount, out_dec).to_f64() * price_out;
 
         let gas_est = self.gas.fill_gas(intent.dest_chain).await;
         let gas_native = gas_est.native_wei;
@@ -174,15 +213,36 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
         let expected_profit_usd = revenue_usd - sourcing_usd - gas_usd;
 
         // 3. Confidence: same value-class sources at par; cross-class carries
-        //    unmodeled slippage.
+        //    unmodeled slippage. Plus a domain sanity backstop — an Across
+        //    relayer's margin is the deposit's fixed fee, a fraction of a
+        //    percent, so a modeled profit that is a large slice of the input
+        //    notional is a pricing artifact, not an edge. Demote it to
+        //    `suspect` (visible via low confidence, never silently dropped) so
+        //    a future mis-pricing can never masquerade as would_fill.
         let same_class = value_class(in_tok) == value_class(out_tok)
             && value_class(in_tok) != AssetClass::Unknown;
-        let confidence = if same_class { CONF_SAME_CLASS } else { CONF_CROSS_CLASS };
+        let implausible_margin =
+            revenue_usd > 0.0 && expected_profit_usd > MAX_PLAUSIBLE_MARGIN_FRAC * revenue_usd;
+        // The backstop only needs to demote routes that would otherwise CLEAR
+        // the fill gate — i.e. same-class ones (cross-class already sits at
+        // CONF_CROSS_CLASS, below threshold, so it can never be a false fill).
+        // A same-class route with an impossible margin is the artifact we must
+        // catch (e.g. WETH→WETH printing a six-figure profit from a flaky
+        // output leg); a normal same-class route keeps its high confidence.
+        let confidence = if same_class {
+            if implausible_margin {
+                CONF_IMPLAUSIBLE
+            } else {
+                CONF_SAME_CLASS
+            }
+        } else {
+            CONF_CROSS_CLASS
+        };
 
         // 4. Assemble the Quote. Output-token unit fields are derived from the
         //    USD figures via `price_out`; `expected_profit_usd` stays the
         //    authoritative number for aggregation (types invariant 5 / P0-B).
-        let out_dec = intent.output_min.decimals;
+        //    `out_dec` is the checked-decimals value derived above.
         let route = Route {
             hops: vec![RouteHop {
                 chain: intent.dest_chain,
@@ -471,6 +531,25 @@ mod tests {
         assert!(q.confidence < FillPolicy::default().min_confidence);
     }
 
+    /// The sanity backstop: a SAME-class route whose modeled margin is a large
+    /// slice of the input notional is a pricing artifact (e.g. a flaky output
+    /// leg pricing WETH→WETH at a six-figure profit), never an edge — relayer
+    /// fees are fractions of a percent. It must be demoted to suspect so it can
+    /// never count as would_fill, even though same-class routes are normally
+    /// high-confidence. Constructed as WETH→WETH whose output amount is dust,
+    /// so sourcing ≈ 0 and profit ≈ full input (≈100% margin ≫ 5%). The
+    /// hand-reasoned margin, not the quote, is what makes this implausible.
+    #[tokio::test]
+    async fn implausible_same_class_margin_is_demoted_to_suspect() {
+        // 1 WETH in (~$3000); output WETH amount is 1 wei → sourcing ≈ 0 →
+        // profit ≈ $3000 on $3000 revenue (≈100% margin). Same-class WETH→WETH.
+        let i = intent(ChainId::BASE, ChainId::BASE, BASE_WETH, 1_000_000_000_000_000_000, 18, BASE_WETH, 1, 18);
+        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
+        assert!(q.expected_profit_usd > 1000.0, "artifact profit is large: {}", q.expected_profit_usd);
+        assert_eq!(q.confidence, CONF_IMPLAUSIBLE, "implausible same-class margin must be demoted");
+        assert!(!FillPolicy::default().is_fill(&q), "an impossible margin must not count as would_fill");
+    }
+
     /// An unrecognised output token has no offline USD price → skip rather
     /// than fabricate a valuation.
     #[tokio::test]
@@ -482,26 +561,32 @@ mod tests {
         }
     }
 
-    /// LP-6 primary exit criterion: the SAME long-tail intent the static feed
-    /// skips with `price_unknown` is **quoted** under `--live-prices`, because
-    /// the live feed prices the unknown output token by contract address. One
-    /// intent, two feeds, opposite outcome — proves live prices unblock the
-    /// cross-chain long-tail (the dominant real flow). Deterministic: the live
-    /// feed runs on a mock resolver, no network.
+    /// Honest scope of `--live-prices` (corrects the original LP-6 claim): a
+    /// live USD price is necessary but **not sufficient** to value an intent —
+    /// we also need the token's decimals, and for an unrecognized token we do
+    /// not know them. The same 0x42... token the static feed skips as
+    /// `price_unknown` is, under live prices, *priced* but still **skipped as
+    /// `unknown_decimals`**: we refuse to convert its raw amount with a guessed
+    /// scale, which would underflow a 6-dp token to ~0 and fabricate a
+    /// full-notional profit (the bug behind absurd would_fill rows). Live prices
+    /// add real-time *values* for tokens we recognize; they do not let us value
+    /// amounts whose decimals we cannot vouch for. Deterministic: mock resolver,
+    /// no network.
     #[tokio::test]
-    async fn live_prices_quote_long_tail_that_static_skips() {
+    async fn live_price_without_known_decimals_still_skips() {
         use crate::{LivePriceFeed, PriceResolver, PriceSource};
         let mystery = Address::repeat_byte(0x42);
         let i = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
 
-        // Static feed: unknown output token → price_unknown skip (the status quo).
+        // Static feed: unknown output token → price_unknown (no price at all).
         assert!(matches!(
             router().quote(&i, i.observed_at).await,
             QuoteOutcome::Skipped(SkipReason::PriceUnknown)
         ));
 
-        // Live feed: the mock prices the 0x42… token by contract; the USDC input
-        // and native ETH defer to the static fallback (empty body → Unknown).
+        // Live feed prices the 0x42... token by contract ($2), but its decimals
+        // are unknown → unknown_decimals skip, NOT a fabricated quote. The USDC
+        // input and native ETH defer to the static fallback (empty body → Unknown).
         let resolver: PriceResolver = Box::new(|url: &str| {
             if url.contains("4242424242") {
                 Ok(r#"{"0x4242424242424242424242424242424242424242":{"usd":2.0}}"#.to_string())
@@ -513,14 +598,13 @@ mod tests {
             PriceSource::Live(LivePriceFeed::with_resolver(StaticPriceFeed::reference(), resolver)),
             StaticGasModel,
         );
-        let q = live
-            .quote(&i, i.observed_at)
-            .await
-            .quote()
-            .cloned()
-            .expect("live prices should quote the long-tail token");
-        // 1000 USDC in ($1000) − 1.0 token out ($2) − tiny Base gas ≈ $998.
-        assert!(q.expected_profit_usd > 900.0, "profit {}", q.expected_profit_usd);
+        assert!(
+            matches!(
+                live.quote(&i, i.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::UnknownDecimals)
+            ),
+            "a live-priced token with unknown decimals must skip as unknown_decimals, not quote"
+        );
     }
 
     /// COV-2/COV-3: a missing USD price is split by chain coverage. On a covered
