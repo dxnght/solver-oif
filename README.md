@@ -58,6 +58,13 @@ source .env
 # open http://127.0.0.1:8088
 ```
 
+Live dashboard without duration:
+
+```bash
+source .env #must! otherwise - warnings.
+./target/release/solver live --chains base,arbitrum,optimism --sources across --live-prices --dashboard-port 8088
+```
+
 ## Architecture
 
 A 6-crate workspace: `types` (data model), `ingest` (historical + live sources),
