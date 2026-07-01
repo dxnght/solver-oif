@@ -97,6 +97,20 @@ profit — hover-тултип `Gross − Gas = Net` (gross = `expected_profit_us
 Нема JS-харнеса → ідентичність `gross = net + gas` застрахована Rust-тестом роутера; JS звірено
 `node --check`. Skipped-інтенти (null profit) — без тултипа.
 
+**DEC — Decimals-чесність у valuation (`checked_decimals`). ✅ ЗРОБЛЕНО (DEC-1..2).** Вузький,
+correctness. Валюація ноги **не** вгадує scale: збережений `AssetAmount.decimals` — ingest-
+зручність із fallback 18, тож 6-dp токен, прочитаний як 18-dp, underflow-иться до ~0 і роздуває
+профіт до повного notional (баг за абсурдними would_fill-рядками). **DEC-1** (роутер, shipped
+`3381ca3`): `checked_decimals(token) → Option` (Some лише для впізнаних: native/stable/WETH/WBTC),
+новий additive skip `unknown_decimals` — модельна нога зі невідомими decimals **скіпається**, не
+квотиться. **DEC-2** (realized-нога, ця гілка): `NormalizedIntent::realized_gross_margin_usd` теж
+через `checked_decimals` → `None` при невпізнаному токені (навіть якщо ціна є — live-фід дає її за
+адресою). Сьогодні спожиток drift досягає цієї ноги лише для квотованих інтентів (ноги вже
+впізнані), але метод публічний і бекає лічильник `with_realized` над **усіма** інтентами — тож
+чесний сам по собі, не через upstream-скіп. Тести: real-адреси USDC (незалежна істина, не
+плейсхолдер) + guard на priced-but-unrecognized realized-токен. Числа для впізнаних токенів
+незмінні (stored == checked).
+
 **Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
