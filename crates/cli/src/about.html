@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>solver — about this dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #21262d;
+    --fg: #e6edf3; --muted: #8b949e; --dim: #6e7681;
+    --excl: #d29922; --margin: #388bfd; --fill: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header a { color: var(--margin); text-decoration: none; margin-left: auto; font-size: 12px; }
+  header a:hover { text-decoration: underline; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; }
+  section {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 16px;
+  }
+  h2 {
+    margin: 0 0 10px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  p { margin: 0 0 10px; }
+  p:last-child { margin-bottom: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 8px; }
+  li:last-child { margin-bottom: 0; }
+  code { background: #0d1117; border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+  a { color: var(--margin); }
+  .not-fill { color: var(--excl); font-weight: 600; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; margin-right: 4px; }
+  .tag.et { background: #1f6feb33; color: #6ea8fe; }
+  .tag.fh { background: #23863633; color: #5fdd7f; }
+  .tag.st { background: #d2992233; color: #e3b341; }
+</style>
+</head>
+<body>
+<header>
+  <h1>solver — about this dashboard</h1>
+  <a href="/">← back to live flow</a>
+</header>
+<main>
+
+<section>
+  <h2>What this is</h2>
+  <p>
+    A live, read-only view of real-time cross-chain intent flow (ERC-7683 / OIF),
+    currently sourced from <b>Across</b> deposits on the configured origin chains.
+    Each observed intent is run through the same routing/decision code
+    (<code>FillPolicy</code>) the project's historical backtest uses, and the
+    outcome — <code>would_fill</code>, a reason, a modeled profit, which gas
+    source produced that number — is logged and streamed here. That's it.
+  </p>
+  <p>
+    This is <b>Phase 1 (live shadow)</b>: a measurement exercise, not a trading
+    system. Phase 2 (real filling) is intentionally parked.
+  </p>
+</section>
+
+<section>
+  <h2>What this is <span class="not-fill">NOT</span></h2>
+  <ul>
+    <li><b>Not executing anything.</b> Zero transactions, zero wallets, zero
+      custody of funds. There is no execution path in this deployment.</li>
+    <li><b>Not a profit claim.</b> <code>would_fill</code> and its modeled profit
+      are a decision the code *would* have made, priced at evaluation time — not
+      a realized trade. The project's own backtest, falsifying its original
+      commercial thesis, found the honest cross-chain edge for a zero-inventory
+      solo filler to be ≈ 0 (capital, latency, and volume competition eat the
+      margin). The full methodology and numbers are in the linked write-up
+      below — not repeated here to avoid two copies drifting apart.</li>
+    <li><b>Not investment advice.</b> Nothing here should inform a trade.</li>
+    <li><b>Not full-coverage.</b> Across is the only real-time source. UniswapX
+      is ingested historically/retrospectively, not live. OIF stays idle by
+      design — its settler contract address is unverified on-chain, and this
+      project's rule is: unverified means untrusted, full stop, until proven
+      otherwise against a live chain.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>How to verify a number instead of trusting it</h2>
+  <ul>
+    <li><b>Verify links.</b> Every decision backed by a real transaction carries
+      a <code>tx ↗</code> link straight to that chain's block explorer. Only
+      known, verified explorer domains are ever linked — an unrecognized chain
+      shows <code>—</code>, never a guessed URL.</li>
+    <li><b>Gas source, per row.</b> Profit is gas-adjusted using a ladder —
+      <span class="tag et">etherscan</span> gas oracle →
+      <span class="tag fh">feehistory</span> (<code>eth_feeHistory</code> RPC) →
+      <span class="tag st">static</span> fallback — and every profit figure
+      shows which rung produced it, so a stale static estimate is never
+      mistaken for a live one. Hover a profit value for the full
+      gross − gas = net breakdown.</li>
+    <li><b>Persisted aggregates.</b> The 24h/7d totals are recomputed from the
+      append-only decisions log on disk (<code>reports/live/decisions-*.jsonl</code>),
+      not just held in a browser tab's memory — a service restart doesn't reset
+      them to zero.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Source &amp; license</h2>
+  <p>
+    Open source at
+    <a href="https://github.com/dxnght/solver-oif" target="_blank" rel="noopener">github.com/dxnght/solver-oif</a>,
+    dual-licensed MIT / Apache-2.0. The full falsification write-up (methodology,
+    numbers, and why the edge is where a zero-capital solo can't reach it) ships
+    in the same repo.
+  </p>
+</section>
+
+</main>
+</body>
+</html>

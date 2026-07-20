@@ -96,6 +96,7 @@
   .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; }
   .badge.wf { background: var(--fill); color: #04130a; }
   .stale { color: var(--excl); font-size: 11px; font-weight: 600; cursor: help; }
+  .gas-src { color: var(--dim); font-size: 11px; cursor: help; }
   td[title] { cursor: help; }
   a { color: var(--margin); text-decoration: none; }
   a:hover { text-decoration: underline; }
@@ -338,13 +339,18 @@ function fmtProfit(p) {
   return `<span style="color:${c}">$${v.toFixed(2)}</span>`;
 }
 
-// HOV-2: the profit <td> with a Gross − Gas = Net hover tooltip and a
-// stale-static-gas flag. INVARIANT: gross = net + gas, where net is THIS
-// record's expected_profit_usd and gas its gas_usd — both off the same `rec`
-// (DFIX-1), since the router defines net = gross − gas. A skipped intent
+// HOV-2 + BFRAME-1: the profit <td> with a Gross − Gas = Net hover tooltip
+// and an ALWAYS-VISIBLE gas-source tag (not hover-only — a reviewer glancing
+// at the page, not hovering every row, should still see which rung priced the
+// gas). INVARIANT: gross = net + gas, where net is THIS record's
+// expected_profit_usd and gas its gas_usd — both off the same `rec` (DFIX-1),
+// since the router defines net = gross − gas. A skipped intent
 // (expected_profit_usd null → price_unknown / unsupported_chain) gets the bare
 // "—" and no tooltip. gas_source === "static" means the gas number is the
-// static floor (no live RPC/oracle) and may be stale — flag it loudly.
+// static floor (no live RPC/oracle) and may be stale — flagged loudly (⚠);
+// etherscan/feehistory get the same tag, styled neutrally, so the source is
+// legible either way.
+const GAS_SRC_ABBR = { etherscan: "es", feehistory: "fh", static: "static" };
 function profitCell(rec) {
   const p = rec.expected_profit_usd;
   if (p === null || p === undefined) return `<td>${fmtProfit(p)}</td>`;
@@ -353,14 +359,16 @@ function profitCell(rec) {
   const gross = net + gas;
   const src = rec.gas_source || "?";
   const stale = src === "static";
+  const abbr = esc(GAS_SRC_ABBR[src] || src);
   let tip =
     `Gross spread  $${gross.toFixed(2)}\n` +
     `− Gas         $${gas.toFixed(2)}  [${src}]\n` +
     `──────────────────────\n` +
     `= Net         $${net.toFixed(2)}`;
   if (stale) tip += `\n⚠ static estimate — may be stale; set ACROSS_RPC_<chain>`;
-  const flag = stale ? ' <span class="stale">⚠ static</span>' : "";
-  return `<td title="${esc(tip)}">${fmtProfit(p)}${flag}</td>`;
+  const cls = stale ? "stale" : "gas-src";
+  const tag = `<span class="${cls}" title="gas source: ${esc(src)}">${stale ? "⚠ " : ""}${abbr}</span>`;
+  return `<td title="${esc(tip)}">${fmtProfit(p)} ${tag}</td>`;
 }
 
 // INVARIANT: every <td> in a row comes from the same record (DFIX-1).

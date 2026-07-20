@@ -8,11 +8,12 @@
 //! No web framework, no build step (rule: B5 "zero-dep, vanilla"). We bind a
 //! [`TcpListener`], speak just enough HTTP/1.1 by hand to answer a handful of
 //! routes — `GET /` (the embedded [`dashboard.html`](include_str!) page),
-//! `GET /events` (a `text/event-stream` of decisions), `GET /healthz` (BNET-1
-//! liveness probe), and `GET /aggregates` (BAGG-1 persisted 24h/7d rollups) —
-//! and fan decisions out over a [`broadcast`] channel. A small replay buffer
-//! of the last [`REPLAY_CAP`] decisions is sent to each new client so a
-//! browser that connects mid-run sees recent flow instead of a blank screen.
+//! `GET /about` (BFRAME-1 "what this is / is not" page), `GET /events` (a
+//! `text/event-stream` of decisions), `GET /healthz` (BNET-1 liveness probe),
+//! and `GET /aggregates` (BAGG-1 persisted 24h/7d rollups) — and fan decisions
+//! out over a [`broadcast`] channel. A small replay buffer of the last
+//! [`REPLAY_CAP`] decisions is sent to each new client so a browser that
+//! connects mid-run sees recent flow instead of a blank screen.
 //!
 //! Narrative is **flow / exclusivity**, not `would_fill` (edge ≈ 0). This
 //! module only moves the records; the framing lives in the HTML.
@@ -30,6 +31,11 @@ use tracing::{debug, warn};
 
 /// The browser UI, embedded at compile time (no runtime file dependency).
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+/// BFRAME-1: the "what this is / is not" page — embedded the same way, no
+/// runtime dependency, so a reviewer can understand the dashboard's limits
+/// from the deployed binary alone.
+const ABOUT_HTML: &str = include_str!("about.html");
 
 /// How many recent decisions a freshly-connected client is replayed, so it
 /// never starts on an empty screen. Small: this is "recent flow", not history
@@ -150,6 +156,7 @@ async fn handle_conn(
     let route = path.split('?').next().unwrap_or("/");
     match route {
         "/" => serve_html(&mut stream).await,
+        "/about" => serve_about(&mut stream).await,
         "/events" => serve_events(stream, tx, replay).await,
         "/healthz" => serve_health(&mut stream).await,
         "/aggregates" => serve_aggregates(&mut stream, &aggregates).await,
@@ -227,6 +234,20 @@ async fn serve_html(stream: &mut TcpStream) -> std::io::Result<()> {
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(DASHBOARD_HTML.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// BFRAME-1: serve the embedded "what this is / is not" page.
+async fn serve_about(stream: &mut TcpStream) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        ABOUT_HTML.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(ABOUT_HTML.as_bytes()).await?;
     stream.flush().await
 }
 
@@ -367,6 +388,21 @@ mod tests {
             "expected html content-type"
         );
         assert!(resp.contains("<!doctype html"), "expected the embedded page body");
+    }
+
+    /// `GET /about` (BFRAME-1) serves the embedded "what this is / is not"
+    /// page — a reviewer must be able to reach it from the running binary
+    /// alone, no external doc lookup.
+    #[tokio::test]
+    async fn serves_embedded_about_page() {
+        let h = serve(0).await.expect("serve");
+        let resp = http_get(h.addr, "/about").await;
+        assert!(resp.contains("200 OK"), "expected 200, got:\n{resp}");
+        assert!(
+            resp.to_lowercase().contains("content-type: text/html"),
+            "expected html content-type"
+        );
+        assert!(resp.contains("What this is"), "expected the about page body");
     }
 
     /// `GET /healthz` (BNET-1) answers a plain 200 "ok" — the reverse-proxy
