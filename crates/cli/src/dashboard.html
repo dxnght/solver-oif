@@ -32,6 +32,18 @@
     background: #1c2128; border-bottom: 1px solid var(--border);
     color: var(--muted); font-size: 12px; padding: 8px 20px;
   }
+  .honest a { margin-left: 8px; }
+  .windowbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #1c2128; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; padding: 8px 20px;
+  }
+  .win-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--fg);
+    font: inherit; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  }
+  .win-btn.active { background: var(--margin); border-color: var(--margin); color: #04101f; font-weight: 600; }
+  .windowbar-asof { margin-left: auto; color: var(--dim); }
   main {
     display: grid; gap: 14px; padding: 16px 20px; max-width: 1180px;
     grid-template-columns: repeat(12, 1fr);
@@ -100,6 +112,13 @@
   Narrative is <b>flow &amp; concentration</b>, not profit. <code>would_fill</code> is
   <b>modeled on static prices, edge ≈ 0</b> — it is rare and we say so. The point of this
   view is how much live flow is locked by incumbents and where the rest goes.
+  <a href="/about">What this is / is not →</a>
+</div>
+<div class="windowbar">
+  <span>Persisted window (BAGG-1 — survives a restart, re-derived from the decisions log):</span>
+  <button type="button" class="win-btn active" data-window="last_24h">24h</button>
+  <button type="button" class="win-btn" data-window="last_7d">7d</button>
+  <span class="windowbar-asof" id="agg-asof"></span>
 </div>
 
 <main>
@@ -113,7 +132,7 @@
   <section class="panel col-flow">
     <h2>Flow</h2>
     <div class="flow-total" id="flow-total">0</div>
-    <div class="flow-cap">intents observed</div>
+    <div class="flow-cap" id="flow-cap">intents observed</div>
     <div class="spark" id="spark"></div>
     <div class="spark-cap" id="spark-cap">intents / minute</div>
   </section>
@@ -156,15 +175,19 @@ const REASON_COLORS = {
   below_margin: "var(--margin)",
   fill: "var(--fill)",
 };
+// Session-only state: the live pulse (sparkline) and the recent-feed table.
+// The headline numbers (exclusivity %, reason/route/chain breakdown, flow
+// total) come from `/aggregates` (BAGG-1) instead — persisted on disk, so
+// they don't reset to zero on a browser reload or a service restart.
 const state = {
-  total: 0,
-  wouldFill: 0,
-  reasons: new Map(),
-  routes: new Map(),
-  chains: new Map(),
   minutes: new Map(), // minuteKey -> count
   feed: [],
 };
+
+// BAGG-1: the last `/aggregates` snapshot ({computed_at, last_24h, last_7d}),
+// and which window the toggle currently shows.
+let aggData = null;
+let aggWindow = "last_24h";
 
 function bump(map, key) { map.set(key, (map.get(key) || 0) + 1); }
 
@@ -177,18 +200,87 @@ function parseRoute(route) {
   return { pair: origin + " → " + dest, dest };
 }
 
-function ingest(rec) {
-  state.total += 1;
-  if (rec.would_fill) state.wouldFill += 1;
-  bump(state.reasons, rec.reason || "unknown");
+function emptyWindow() { return { total: 0, would_fill: 0, reasons: {}, routes: {}, dest_chains: {} }; }
+
+// Mirrors the server's `WindowAgg::bump` (crates/cli/src/aggregates.rs) so a
+// decision that just arrived over SSE shows up immediately, without waiting
+// for the next `/aggregates` poll — which still runs periodically and is the
+// source of truth (it also evicts records that age out of a window).
+function bumpWindow(w, rec) {
+  w.total = (w.total || 0) + 1;
+  if (rec.would_fill) w.would_fill = (w.would_fill || 0) + 1;
+  const reason = rec.reason || "unknown";
+  w.reasons = w.reasons || {};
+  w.reasons[reason] = (w.reasons[reason] || 0) + 1;
   const { pair, dest } = parseRoute(rec.route);
-  bump(state.routes, pair);
-  bump(state.chains, dest);
+  w.routes = w.routes || {};
+  w.routes[pair] = (w.routes[pair] || 0) + 1;
+  w.dest_chains = w.dest_chains || {};
+  w.dest_chains[dest] = (w.dest_chains[dest] || 0) + 1;
+}
+
+function ingest(rec) {
   bump(state.minutes, Math.floor(Date.now() / 60000));
   state.feed.unshift(rec);
   if (state.feed.length > FEED_CAP) state.feed.pop();
+  if (aggData) {
+    bumpWindow(aggData.last_24h, rec);
+    bumpWindow(aggData.last_7d, rec);
+    renderAggregates();
+  }
   scheduleRender();
 }
+
+// ---- BAGG-1: persisted 24h/7d aggregates (polled, not session-derived) -----
+async function fetchAggregates() {
+  try {
+    const res = await fetch("/aggregates", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data) {
+      aggData = data;
+      renderAggregates();
+    }
+  } catch (e) {
+    // Transient fetch failure — the live feed/sparkline (SSE) keeps working;
+    // we just try again on the next poll.
+  }
+}
+
+function renderAggregates() {
+  if (!aggData) return;
+  const w = aggData[aggWindow] || emptyWindow();
+  const exclusive = (w.reasons && w.reasons.exclusive_to_other) || 0;
+  const pct = w.total ? (exclusive / w.total) * 100 : 0;
+  document.getElementById("excl-pct").innerHTML =
+    `${pct.toFixed(w.total ? 1 : 0)}<small>%</small>`;
+  document.getElementById("excl-sub").innerHTML =
+    `<code>reason = exclusive_to_other</code> · ${exclusive} / ${w.total}` +
+    ` · would_fill: ${w.would_fill || 0}`;
+
+  document.getElementById("flow-total").textContent = (w.total || 0).toLocaleString();
+  const windowLabel = aggWindow === "last_7d" ? "7d" : "24h";
+  document.getElementById("flow-cap").textContent = `intents observed · persisted ${windowLabel}`;
+
+  renderBars("reasons", new Map(Object.entries(w.reasons || {})), colorFor);
+  renderBars("routes", new Map(Object.entries(w.routes || {})), "var(--other)");
+  renderBars("chains", new Map(Object.entries(w.dest_chains || {})), "var(--margin)");
+
+  const asof = document.getElementById("agg-asof");
+  const t = aggData.computed_at ? new Date(aggData.computed_at) : null;
+  asof.textContent = t && !Number.isNaN(t.getTime())
+    ? `as of ${t.toLocaleTimeString()}`
+    : "";
+}
+
+document.querySelectorAll(".win-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".win-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    aggWindow = btn.dataset.window;
+    renderAggregates();
+  });
+});
 
 // ---- Rendering (throttled to one paint per frame) ---------------------------
 let pending = false;
@@ -304,20 +396,12 @@ function renderFeed() {
   el.innerHTML = state.feed.map(feedRow).join("");
 }
 
+// Session-only render: the live pulse (sparkline) and the recent-feed table.
+// The persisted headline numbers are `renderAggregates()`'s job, called
+// separately (on poll and on each optimistic SSE bump) so a slow/failed
+// aggregates fetch never blanks the feed, and vice versa.
 function render() {
-  const exclusive = state.reasons.get("exclusive_to_other") || 0;
-  const pct = state.total ? (exclusive / state.total) * 100 : 0;
-  document.getElementById("excl-pct").innerHTML =
-    `${pct.toFixed(state.total ? 1 : 0)}<small>%</small>`;
-  document.getElementById("excl-sub").innerHTML =
-    `<code>reason = exclusive_to_other</code> · ${exclusive} / ${state.total}` +
-    (state.wouldFill ? ` · would_fill: ${state.wouldFill}` : ` · would_fill: 0`);
-
-  document.getElementById("flow-total").textContent = state.total.toLocaleString();
   renderSpark();
-  renderBars("reasons", state.reasons, colorFor);
-  renderBars("routes", state.routes, "var(--other)");
-  renderBars("chains", state.chains, "var(--margin)");
   renderFeed();
 }
 
@@ -337,6 +421,8 @@ es.onmessage = (ev) => {
 };
 
 render();
+fetchAggregates();
+setInterval(fetchAggregates, 30000);
 </script>
 </body>
 </html>

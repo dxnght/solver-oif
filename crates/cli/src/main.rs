@@ -6,6 +6,7 @@
 //! (settler address unverified) and says so loudly rather than failing
 //! silently (legibility is first-class — `CLAUDE.md` §7).
 
+mod aggregates;
 mod dashboard;
 mod doctor;
 mod live;

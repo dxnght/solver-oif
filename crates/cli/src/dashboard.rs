@@ -6,12 +6,13 @@
 //! [`DashboardHandle::publish`] alongside its JSONL write, never instead.
 //!
 //! No web framework, no build step (rule: B5 "zero-dep, vanilla"). We bind a
-//! [`TcpListener`], speak just enough HTTP/1.1 by hand to answer two routes —
-//! `GET /` (the embedded [`dashboard.html`](include_str!) page) and
-//! `GET /events` (a `text/event-stream` of decisions) — and fan decisions out
-//! over a [`broadcast`] channel. A small replay buffer of the last
-//! [`REPLAY_CAP`] decisions is sent to each new client so a browser that
-//! connects mid-run sees recent flow instead of a blank screen.
+//! [`TcpListener`], speak just enough HTTP/1.1 by hand to answer a handful of
+//! routes — `GET /` (the embedded [`dashboard.html`](include_str!) page),
+//! `GET /events` (a `text/event-stream` of decisions), `GET /healthz` (BNET-1
+//! liveness probe), and `GET /aggregates` (BAGG-1 persisted 24h/7d rollups) —
+//! and fan decisions out over a [`broadcast`] channel. A small replay buffer
+//! of the last [`REPLAY_CAP`] decisions is sent to each new client so a
+//! browser that connects mid-run sees recent flow instead of a blank screen.
 //!
 //! Narrative is **flow / exclusivity**, not `would_fill` (edge ≈ 0). This
 //! module only moves the records; the framing lives in the HTML.
@@ -49,6 +50,11 @@ const CHANNEL_CAP: usize = 1024;
 pub struct DashboardHandle {
     tx: broadcast::Sender<String>,
     replay: Arc<Mutex<VecDeque<String>>>,
+    /// BAGG-1: the last recomputed 24h/7d aggregates snapshot, pre-serialized
+    /// JSON. `None` until the live loop's first [`Self::set_aggregates`] call
+    /// (a client connecting in that brief window gets `null`, handled by the
+    /// dashboard JS as "not loaded yet" — never a crash).
+    aggregates: Arc<Mutex<Option<String>>>,
     /// The actually-bound address (useful when `port = 0` picks an ephemeral
     /// one, e.g. in tests, and for the startup log line).
     pub addr: SocketAddr,
@@ -79,6 +85,14 @@ impl DashboardHandle {
         // the replay buffer for whoever connects next.
         let _ = self.tx.send(json);
     }
+
+    /// BAGG-1: swap in a freshly recomputed aggregates snapshot, serialized by
+    /// the caller (`crate::aggregates::compute` + `serde_json::to_string`).
+    /// Replaces the whole snapshot atomically — `/aggregates` never serves a
+    /// half-updated window.
+    pub fn set_aggregates(&self, json: String) {
+        *self.aggregates.lock().expect("aggregates poisoned") = Some(json);
+    }
 }
 
 /// Bind the dashboard on `127.0.0.1:port` (loopback only — this is an
@@ -90,17 +104,20 @@ pub async fn serve(port: u16) -> Result<DashboardHandle> {
     let addr = listener.local_addr()?;
     let (tx, _rx) = broadcast::channel::<String>(CHANNEL_CAP);
     let replay = Arc::new(Mutex::new(VecDeque::with_capacity(REPLAY_CAP)));
+    let aggregates = Arc::new(Mutex::new(None));
 
     let accept_tx = tx.clone();
     let accept_replay = Arc::clone(&replay);
+    let accept_aggregates = Arc::clone(&aggregates);
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _peer)) => {
                     let tx = accept_tx.clone();
                     let replay = Arc::clone(&accept_replay);
+                    let aggregates = Arc::clone(&accept_aggregates);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, tx, replay).await {
+                        if let Err(e) = handle_conn(stream, tx, replay, aggregates).await {
                             debug!(error = %e, "dashboard: connection ended");
                         }
                     });
@@ -113,7 +130,7 @@ pub async fn serve(port: u16) -> Result<DashboardHandle> {
         }
     });
 
-    Ok(DashboardHandle { tx, replay, addr })
+    Ok(DashboardHandle { tx, replay, aggregates, addr })
 }
 
 /// Read the request line, route to the right handler. We only need the path,
@@ -123,6 +140,7 @@ async fn handle_conn(
     mut stream: TcpStream,
     tx: broadcast::Sender<String>,
     replay: Arc<Mutex<VecDeque<String>>>,
+    aggregates: Arc<Mutex<Option<String>>>,
 ) -> std::io::Result<()> {
     let path = match read_request_path(&mut stream).await? {
         Some(p) => p,
@@ -134,6 +152,7 @@ async fn handle_conn(
         "/" => serve_html(&mut stream).await,
         "/events" => serve_events(stream, tx, replay).await,
         "/healthz" => serve_health(&mut stream).await,
+        "/aggregates" => serve_aggregates(&mut stream, &aggregates).await,
         _ => serve_404(&mut stream).await,
     }
 }
@@ -154,6 +173,32 @@ async fn serve_health(stream: &mut TcpStream) -> std::io::Result<()> {
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(BODY.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// BAGG-1: serve the last computed 24h/7d aggregates snapshot as JSON. Before
+/// the live loop's first [`DashboardHandle::set_aggregates`] call this is
+/// `null` — the dashboard JS treats that as "not loaded yet" (same as any
+/// other slow first paint), never a crash.
+async fn serve_aggregates(
+    stream: &mut TcpStream,
+    aggregates: &Mutex<Option<String>>,
+) -> std::io::Result<()> {
+    let body = aggregates
+        .lock()
+        .expect("aggregates poisoned")
+        .clone()
+        .unwrap_or_else(|| "null".to_string());
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/json\r\n\
+         Cache-Control: no-cache\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body.as_bytes()).await?;
     stream.flush().await
 }
 
@@ -337,6 +382,23 @@ mod tests {
             "expected text/plain content-type"
         );
         assert!(resp.trim_end().ends_with("ok"), "expected body 'ok', got:\n{resp}");
+    }
+
+    /// `GET /aggregates` (BAGG-1) is `null` before the live loop ever calls
+    /// `set_aggregates` — never a crash for a client that connects in that
+    /// window — and round-trips whatever JSON was last set, verbatim.
+    #[tokio::test]
+    async fn aggregates_serves_last_snapshot_or_null() {
+        let h = serve(0).await.expect("serve");
+
+        let before = http_get(h.addr, "/aggregates").await;
+        assert!(before.contains("200 OK"), "expected 200, got:\n{before}");
+        assert!(before.contains("application/json"), "expected json content-type");
+        assert!(before.trim_end().ends_with("null"), "no snapshot yet ⇒ null, got:\n{before}");
+
+        h.set_aggregates(r#"{"computed_at":"2026-01-01T00:00:00Z","last_24h":{"total":1}}"#.to_string());
+        let after = http_get(h.addr, "/aggregates").await;
+        assert!(after.contains(r#""total":1"#), "expected the snapshot we set, got:\n{after}");
     }
 
     /// `GET /events` is an event-stream and forwards a published

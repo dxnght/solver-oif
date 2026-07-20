@@ -139,6 +139,13 @@ pub async fn run(
         Some(port) => {
             let handle = crate::dashboard::serve(port).await?;
             info!("dashboard: http://127.0.0.1:{}", handle.addr.port());
+            // BAGG-1: seed the persisted 24h/7d aggregates from disk BEFORE the
+            // loop starts, so a restart's first page load already reflects
+            // history instead of resetting to zero while new decisions trickle in.
+            let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
+            if let Ok(json) = serde_json::to_string(&agg) {
+                handle.set_aggregates(json);
+            }
             Some(handle)
         }
         None => None,
@@ -171,6 +178,16 @@ pub async fn run(
             _ = heartbeat.tick() => {
                 info!(intents = total, since_last = total - last_heartbeat, "live heartbeat");
                 last_heartbeat = total;
+                // BAGG-1: refresh the persisted aggregates from disk on the same
+                // cadence as the heartbeat — cheap at this scale (rule #5: no
+                // premature incremental-eviction machinery) and keeps `/aggregates`
+                // from drifting stale for long between restarts.
+                if let Some(d) = &dashboard {
+                    let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
+                    if let Ok(json) = serde_json::to_string(&agg) {
+                        d.set_aggregates(json);
+                    }
+                }
             }
             maybe = rx.recv() => match maybe {
                 None => {
