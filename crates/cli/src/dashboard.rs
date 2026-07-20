@@ -133,8 +133,28 @@ async fn handle_conn(
     match route {
         "/" => serve_html(&mut stream).await,
         "/events" => serve_events(stream, tx, replay).await,
+        "/healthz" => serve_health(&mut stream).await,
         _ => serve_404(&mut stream).await,
     }
+}
+
+/// Liveness probe: a tiny `200 ok` so a reverse proxy / uptime monitor can
+/// check the listener is up without fetching the whole page. "Up" here means
+/// the HTTP server is answering; sparse intent flow (legitimately no decisions
+/// for a while) is not unhealthy, so this deliberately does not gate on recent
+/// activity.
+async fn serve_health(stream: &mut TcpStream) -> std::io::Result<()> {
+    const BODY: &str = "ok";
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        BODY.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(BODY.as_bytes()).await?;
+    stream.flush().await
 }
 
 /// Parse the request-target from the HTTP request line. Returns `None` on an
@@ -302,6 +322,21 @@ mod tests {
             "expected html content-type"
         );
         assert!(resp.contains("<!doctype html"), "expected the embedded page body");
+    }
+
+    /// `GET /healthz` (BNET-1) answers a plain 200 "ok" — the reverse-proxy
+    /// liveness target — independent of whether any decision has ever been
+    /// published (an idle-but-up server is healthy, not silent-broken).
+    #[tokio::test]
+    async fn healthz_answers_ok() {
+        let h = serve(0).await.expect("serve");
+        let resp = http_get(h.addr, "/healthz").await;
+        assert!(resp.contains("200 OK"), "expected 200, got:\n{resp}");
+        assert!(
+            resp.to_lowercase().contains("content-type: text/plain"),
+            "expected text/plain content-type"
+        );
+        assert!(resp.trim_end().ends_with("ok"), "expected body 'ok', got:\n{resp}");
     }
 
     /// `GET /events` is an event-stream and forwards a published
