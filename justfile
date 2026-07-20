@@ -40,12 +40,17 @@ live duration="600":
     ./target/release/solver live --chains base,arbitrum,optimism --sources across \
         --dashboard-port 8088 --duration {{duration}} --out reports/live
 
-# Tail live decisions as a terminal report.
-report-live dir="reports/live":
-    ./target/release/solver report-live --dir {{dir}}
+# Quick terminal summary of live decisions (reason / gas-source distribution)
+# straight from the JSONL — no server needed, works on an old reports/live/
+# dir with nothing running. For a live, time-windowed view (24h/7d,
+# exclusivity %) run `solver live --dashboard-port` and hit GET /aggregates
+# instead (BAGG-1) — this recipe doesn't window by time, it's a raw tally.
+summary dir="reports/live":
+    @grep -h -o '"reason":"[a-z_]*"' {{dir}}/decisions-*.jsonl | sort | uniq -c
+    @grep -h -o '"gas_source":"[a-z]*"' {{dir}}/decisions-*.jsonl | sort | uniq -c
 
 # BDEPLOY-1: after `git push`, one command to ship — SSH in and run the same
 # pull/build/verify/restart update.sh a server admin would run by hand.
 # Usage: just deploy-remote host=you@your.vps
 deploy-remote host:
-    ssh {{host}} '~/solver-engine/deploy/update.sh'
+    ssh {{host}} '~/solver-oif/deploy/update.sh'
