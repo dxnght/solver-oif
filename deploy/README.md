@@ -48,16 +48,16 @@ sudo ufw enable
 
 ```bash
 # clone as YOUR OWN account (adjust the URL/branch) — NOT the solver service user
-git clone https://github.com/dxnght/solver-engine ~/solver-engine
+git clone https://github.com/dxnght/solver-oif ~/solver-oif
 
 # secrets: written by you, owned by the unprivileged runtime user
-sudo cp ~/solver-engine/deploy/solver.env.example /opt/solver/solver.env
+sudo cp ~/solver-oif/deploy/solver.env.example /opt/solver/solver.env
 sudo $EDITOR /opt/solver/solver.env                # fill in keys
 sudo chown solver:solver /opt/solver/solver.env
 sudo chmod 600 /opt/solver/solver.env
 
 # first build + binary
-cd ~/solver-engine && cargo build --workspace --release
+cd ~/solver-oif && cargo build --workspace --release
 sudo install -m 0755 target/release/solver /opt/solver/bin/solver
 ```
 
@@ -65,7 +65,7 @@ sudo install -m 0755 target/release/solver /opt/solver/bin/solver
 
 ```bash
 # systemd
-sudo cp ~/solver-engine/deploy/solver-live.service /etc/systemd/system/
+sudo cp ~/solver-oif/deploy/solver-live.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now solver-live
 journalctl -u solver-live -f          # confirm: "live shadow started", heartbeats
@@ -74,8 +74,8 @@ journalctl -u solver-live -f          # confirm: "live shadow started", heartbea
 curl -s localhost:8088/healthz         # → ok
 
 # Caddy: put your domain in the Caddyfile, then install + reload
-sudo sed -i 's/intents.example.com/YOUR.DOMAIN/' ~/solver-engine/deploy/Caddyfile
-sudo cp ~/solver-engine/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo sed -i 's/intents.example.com/YOUR.DOMAIN/' ~/solver-oif/deploy/Caddyfile
+sudo cp ~/solver-oif/deploy/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
@@ -90,7 +90,7 @@ On the server, as your own admin account (needs `sudo` for `install` and
 service):
 
 ```bash
-~/solver-engine/deploy/update.sh
+~/solver-oif/deploy/update.sh
 ```
 
 Or from your laptop, one command after `git push`:

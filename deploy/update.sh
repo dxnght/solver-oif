@@ -5,12 +5,12 @@
 # as a user who can sudo systemctl, from the repo checkout:
 #   ./deploy/update.sh
 #
-# Assumes: repo at ~/solver-engine (adjust REPO), install root /opt/solver,
+# Assumes: repo at ~/solver-oif (adjust REPO), install root /opt/solver,
 # binary at /opt/solver/bin/solver, service `solver-live`.
 
 set -euo pipefail
 
-REPO="${REPO:-$HOME/solver-engine}"
+REPO="${REPO:-$HOME/solver-oif}"
 INSTALL="${INSTALL:-/opt/solver}"
 
 echo "==> updating $REPO"
