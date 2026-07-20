@@ -105,7 +105,16 @@ static-ціни (та ще й тавтологічної: модель і realiz
    `gas_source == "static"` позначено `⚠ static` (жовтий) + підказка «set ACROSS_RPC_<chain>»,
    щоб stale-газ було видно. HOV-1 уже зроблено в GAS-1; ідентичність `gross = net + gas`
    застраховано Rust-тестом (JS-харнеса нема), JS звірено `node --check` — **зроблено** (HOV-1..3).
-10. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+10. ✅ **BETA-1 — ядро бети (публічно + надійно + чесно)**: `BNET-1` (`deploy/Caddyfile` +
+    `GET /healthz` — публічний HTTPS-front на loopback:8088), `BAGG-1` (`cli/src/aggregates.rs`
+    — 24h/7d агрегати перераховуються з `decisions-*.jsonl` при старті й на кожен heartbeat,
+    `GET /aggregates`, дашборд полить із перемикачем 24h/7d — рестарт не втрачає історію,
+    звірено наживо), `BRESIL-1` (`deploy/solver-live.service` — unbounded, restart-on-failure,
+    hardened), `BFRAME-1` (`GET /about` + `gas_source` завжди видимий інлайн-тег, не лише
+    hover), `BDEPLOY-1` (`deploy/update.sh` + `just deploy-remote`; виправлено нестиковку
+    nested-sudo в чернетці й дрейф назви репо `solver-engine`→`solver-oif`) — **зроблено**.
+    Реальний прогін на VPS (Hetzner) — за людиною, не агентом.
+11. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

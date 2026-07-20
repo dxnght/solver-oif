@@ -105,12 +105,13 @@ which just SSHes in and runs the same script (see the justfile).
 
 ## Known beta limits (honest)
 
-- **Aggregates are in-memory (BAGG-1 pending).** Top-routes / exclusivity % are
-  computed from flow since the process started; a restart resets them until
-  BAGG-1 adds persistent 24h/7d rollups. `Restart=on-failure` keeps the process
-  up for long stretches, so this bites only on deploys.
+- **Aggregates recompute wholesale from disk (BAGG-1 done, not incremental).**
+  `/aggregates` is recomputed from every `decisions-*.jsonl` under `--out` once
+  at startup and every heartbeat (60s) — correct and restart-safe, but a full
+  rescan, not an incrementally-maintained counter. Fine at this project's
+  scale; would need revisiting if the decisions log ever got large.
 - **Across-only.** OIF idle, UniswapX is retrospective-poll. Cross-chain Across
-  flow is the MVP scope; the "coverage" note on the page should say so.
+  flow is the MVP scope; `/about` says so.
 - **Niche by design.** This is a developer/researcher/grant tool, not a
   high-traffic site; no CDN/rate-limit tuning needed yet (Caddy can add both
   later if it ever matters).

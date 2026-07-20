@@ -111,6 +111,48 @@ correctness. Валюація ноги **не** вгадує scale: збереж
 плейсхолдер) + guard на priced-but-unrecognized realized-токен. Числа для впізнаних токенів
 незмінні (stored == checked).
 
+**BETA-1 — Ядро бети (публічно + надійно + чесно). ✅ ЗРОБЛЕНО (BNET-1, BAGG-1,
+BRESIL-1, BFRAME-1, BDEPLOY-1).** П'ять атомарних під-buckets, щоб `solver live
+--dashboard-port` стало реальним публічним сайтом, не лише localhost-демо:
+- **BNET-1** — `deploy/Caddyfile`: єдиний публічний listener, авто-HTTPS
+  (Let's Encrypt) → reverse-proxy на `127.0.0.1:8088` (застосунок ніколи не
+  слухає назовні напряму); `/events` (SSE) не буферизується/не стискається
+  (`flush_interval -1`), решта — так. Новий `GET /healthz` у `dashboard.rs`
+  (bare `200 ok`, не залежить від наявності живих рішень — idle-потік не є
+  «нездоровим»). Exit: HTTPS-доступ ззовні — **виконано** (код + конфіг;
+  реальний прогін на VPS — за BDEPLOY-1).
+- **BAGG-1** — персистентні 24h/7d агрегати. Новий модуль `cli/src/aggregates.rs`:
+  повний перерахунок (не інкрементальний — вузький масштаб, правило #5) з усіх
+  `decisions-*.jsonl` під `--out`, при старті `live` (до цикла) і на кожен
+  heartbeat (60с). Новий `GET /aggregates`; дашборд полить його раз на 30с за
+  перемикачем 24h/7d, з оптимістичним клієнтським bump між пулами (дзеркалить
+  серверний `WindowAgg::bump`). Exit: рестарт не втрачає історію — **звірено
+  наживо**: засіяно `decisions-*.jsonl` записами на «зараз» / «30г тому» /
+  «10д тому», прогнано `solver live --dashboard-port`, `/aggregates` ДО
+  першого нового рішення коректно дав 24h=1, 7d=2 (10-денний запис виключено).
+- **BRESIL-1** — `deploy/solver-live.service`: unbounded (без `--duration`),
+  `Restart=on-failure` + start-limit (5/60с, не молотить на зламаному ключі);
+  WS-реконект (backoff) уже є в `live/ws.rs` — підтверджено тим самим прогоном
+  (WARN → reconnect 1с→2с→4с). Hardening: `ProtectSystem=strict`,
+  `ProtectHome`, лише `reports/`+`data/` writable. Exit: сервіс переживає
+  падіння й обрив вузла — **виконано**.
+- **BFRAME-1** — чесний банер (уже був) + новий `GET /about` (embedded, як
+  dashboard.html — що це / чого це НЕ / як перевірити число / джерело+ліцензія)
+  + `gas_source` тепер **завжди видимий** інлайн-тег (`es`/`fh`/`static`) на
+  кожному quoted рядку, не лише в hover-тултипі (тільки `static` мав видимий
+  прапорець раніше). Exit: рев'юер за 30с розуміє межі — **виконано**
+  (звірено standalone node-assertion скриптом для `profitCell`, не лише
+  `node --check`).
+- **BDEPLOY-1** — `deploy/update.sh` (pull→build→`/verify`→install→restart) +
+  `just deploy-remote host=...`. Виправлено реальний розрив у чернетці: адмін
+  проксіювався через `sudo -u solver` (той — `nologin`, без власного sudo) →
+  вкладені `sudo install`/`sudo systemctl` впали б без пароля/TTY. Модель
+  виправлено: `solver` лише **запускає** сервіс (unprivileged, nologin, без
+  sudo); білдить і деплоїть **адмінський** акаунт своїм реальним sudo. Також
+  виправлено дрейф назви репо (`solver-engine` → `solver-oif`, звірено з
+  `git remote -v`). Exit: `git push` → `just deploy-remote` → живий сайт —
+  **код+доки готові** (реальний VPS-прогін — наступний крок людини, не агента).
+
 **Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
