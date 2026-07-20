@@ -43,3 +43,9 @@ live duration="600":
 # Tail live decisions as a terminal report.
 report-live dir="reports/live":
     ./target/release/solver report-live --dir {{dir}}
+
+# BDEPLOY-1: after `git push`, one command to ship — SSH in and run the same
+# pull/build/verify/restart update.sh a server admin would run by hand.
+# Usage: just deploy-remote host=you@your.vps
+deploy-remote host:
+    ssh {{host}} '~/solver-engine/deploy/update.sh'
