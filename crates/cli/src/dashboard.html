@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>solver — live cross-chain flow</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #21262d;
+    --fg: #e6edf3; --muted: #8b949e; --dim: #6e7681;
+    --excl: #d29922;   /* exclusivity — the headline */
+    --price: #6e7681;  /* price_unknown */
+    --margin: #388bfd; /* below_margin */
+    --fill: #3fb950;   /* would_fill / fill — rare */
+    --other: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  #status { margin-left: auto; font-size: 12px; color: var(--dim); }
+  #status.live { color: var(--fill); }
+  #status.down { color: var(--excl); }
+  .honest {
+    background: #1c2128; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; padding: 8px 20px;
+  }
+  .honest a { margin-left: 8px; }
+  .windowbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #1c2128; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; padding: 8px 20px;
+  }
+  .win-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--fg);
+    font: inherit; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  }
+  .win-btn.active { background: var(--margin); border-color: var(--margin); color: #04101f; font-weight: 600; }
+  .windowbar-asof { margin-left: auto; color: var(--dim); }
+  main {
+    display: grid; gap: 14px; padding: 16px 20px; max-width: 1180px;
+    grid-template-columns: repeat(12, 1fr);
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; min-width: 0;
+  }
+  .panel h2 {
+    margin: 0 0 10px; font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+  }
+  .col-hero { grid-column: span 4; }
+  .col-half { grid-column: span 4; }
+  .col-flow { grid-column: span 4; }
+  .col-wide { grid-column: span 6; }
+  .col-feed { grid-column: span 12; }
+  @media (max-width: 860px) {
+    .col-hero, .col-half, .col-flow, .col-wide { grid-column: span 12; }
+  }
+
+  /* Hero — exclusivity capture */
+  .hero-num { font-size: 56px; font-weight: 700; color: var(--excl); line-height: 1; }
+  .hero-num small { font-size: 22px; }
+  .hero-cap { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .hero-sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
+
+  /* Bars (reason / routes / chains) */
+  .bars { display: flex; flex-direction: column; gap: 6px; }
+  .bar-row { display: grid; grid-template-columns: 130px 1fr 48px; align-items: center; gap: 8px; }
+  .bar-label { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { background: #0d1117; border-radius: 4px; height: 16px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; min-width: 2px; transition: width .25s ease; }
+  .bar-val { text-align: right; color: var(--dim); font-size: 12px; }
+
+  /* Flow */
+  .flow-total { font-size: 40px; font-weight: 700; line-height: 1; }
+  .flow-cap { color: var(--muted); font-size: 12px; margin: 4px 0 12px; }
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 48px; }
+  .spark-bar { flex: 1; background: var(--margin); border-radius: 2px 2px 0 0; min-height: 2px; opacity: .85; }
+  .spark-cap { color: var(--dim); font-size: 11px; margin-top: 6px; }
+
+  /* Feed */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 8px; border-bottom: 1px solid #1b2129; white-space: nowrap; }
+  td.route { color: var(--fg); }
+  td.reason { font-weight: 600; }
+  tr.wf { background: rgba(63,185,80,.08); }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.wf { background: var(--fill); color: #04130a; }
+  .stale { color: var(--excl); font-size: 11px; font-weight: 600; cursor: help; }
+  .gas-src { color: var(--dim); font-size: 11px; cursor: help; }
+  td[title] { cursor: help; }
+  a { color: var(--margin); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .empty { color: var(--dim); padding: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>solver — live cross-chain flow</h1>
+  <span class="sub">Phase-1 shadow · zero transactions</span>
+  <span id="status">● connecting…</span>
+</header>
+<div class="honest">
+  Narrative is <b>flow &amp; concentration</b>, not profit. <code>would_fill</code> is
+  <b>modeled on static prices, edge ≈ 0</b> — it is rare and we say so. The point of this
+  view is how much live flow is locked by incumbents and where the rest goes.
+  <a href="/about">What this is / is not →</a>
+</div>
+<div class="windowbar">
+  <span>Persisted window (BAGG-1 — survives a restart, re-derived from the decisions log):</span>
+  <button type="button" class="win-btn active" data-window="last_24h">24h</button>
+  <button type="button" class="win-btn" data-window="last_7d">7d</button>
+  <span class="windowbar-asof" id="agg-asof"></span>
+</div>
+
+<main>
+  <section class="panel col-hero">
+    <h2>Exclusivity capture</h2>
+    <div class="hero-num" id="excl-pct">—<small>%</small></div>
+    <div class="hero-cap" id="excl-line">of live flow locked by incumbents</div>
+    <div class="hero-sub" id="excl-sub"><code>reason = exclusive_to_other</code></div>
+  </section>
+
+  <section class="panel col-flow">
+    <h2>Flow</h2>
+    <div class="flow-total" id="flow-total">0</div>
+    <div class="flow-cap" id="flow-cap">intents observed</div>
+    <div class="spark" id="spark"></div>
+    <div class="spark-cap" id="spark-cap">intents / minute</div>
+  </section>
+
+  <section class="panel col-half">
+    <h2>Reason breakdown</h2>
+    <div class="bars" id="reasons"><div class="empty">waiting for decisions…</div></div>
+  </section>
+
+  <section class="panel col-wide">
+    <h2>Top routes (origin → dest)</h2>
+    <div class="bars" id="routes"><div class="empty">waiting…</div></div>
+  </section>
+
+  <section class="panel col-wide">
+    <h2>Top destination chains</h2>
+    <div class="bars" id="chains"><div class="empty">waiting…</div></div>
+  </section>
+
+  <section class="panel col-feed">
+    <h2>Live feed — last 50</h2>
+    <table>
+      <thead>
+        <tr><th>time</th><th>route</th><th>reason</th><th>profit (modeled)</th><th>verify</th></tr>
+      </thead>
+      <tbody id="feed"><tr><td class="empty" colspan="5">waiting for intents…</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---- Client-side accumulation (the server only streams records) -------------
+const FEED_CAP = 50;
+const SPARK_MINUTES = 24;
+const REASON_COLORS = {
+  exclusive_to_other: "var(--excl)",
+  price_unknown: "var(--price)",
+  below_margin: "var(--margin)",
+  fill: "var(--fill)",
+};
+// Session-only state: the live pulse (sparkline) and the recent-feed table.
+// The headline numbers (exclusivity %, reason/route/chain breakdown, flow
+// total) come from `/aggregates` (BAGG-1) instead — persisted on disk, so
+// they don't reset to zero on a browser reload or a service restart.
+const state = {
+  minutes: new Map(), // minuteKey -> count
+  feed: [],
+};
+
+// BAGG-1: the last `/aggregates` snapshot ({computed_at, last_24h, last_7d}),
+// and which window the toggle currently shows.
+let aggData = null;
+let aggWindow = "last_24h";
+
+function bump(map, key) { map.set(key, (map.get(key) || 0) + 1); }
+
+// route looks like "base->arbitrum/833589->af88d0" — take the chain pair.
+function parseRoute(route) {
+  const chainSeg = String(route || "").split("/")[0];
+  const parts = chainSeg.split("->");
+  const origin = parts[0] || "?";
+  const dest = parts[1] || "?";
+  return { pair: origin + " → " + dest, dest };
+}
+
+function emptyWindow() { return { total: 0, would_fill: 0, reasons: {}, routes: {}, dest_chains: {} }; }
+
+// Mirrors the server's `WindowAgg::bump` (crates/cli/src/aggregates.rs) so a
+// decision that just arrived over SSE shows up immediately, without waiting
+// for the next `/aggregates` poll — which still runs periodically and is the
+// source of truth (it also evicts records that age out of a window).
+function bumpWindow(w, rec) {
+  w.total = (w.total || 0) + 1;
+  if (rec.would_fill) w.would_fill = (w.would_fill || 0) + 1;
+  const reason = rec.reason || "unknown";
+  w.reasons = w.reasons || {};
+  w.reasons[reason] = (w.reasons[reason] || 0) + 1;
+  const { pair, dest } = parseRoute(rec.route);
+  w.routes = w.routes || {};
+  w.routes[pair] = (w.routes[pair] || 0) + 1;
+  w.dest_chains = w.dest_chains || {};
+  w.dest_chains[dest] = (w.dest_chains[dest] || 0) + 1;
+}
+
+function ingest(rec) {
+  bump(state.minutes, Math.floor(Date.now() / 60000));
+  state.feed.unshift(rec);
+  if (state.feed.length > FEED_CAP) state.feed.pop();
+  if (aggData) {
+    bumpWindow(aggData.last_24h, rec);
+    bumpWindow(aggData.last_7d, rec);
+    renderAggregates();
+  }
+  scheduleRender();
+}
+
+// ---- BAGG-1: persisted 24h/7d aggregates (polled, not session-derived) -----
+async function fetchAggregates() {
+  try {
+    const res = await fetch("/aggregates", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data) {
+      aggData = data;
+      renderAggregates();
+    }
+  } catch (e) {
+    // Transient fetch failure — the live feed/sparkline (SSE) keeps working;
+    // we just try again on the next poll.
+  }
+}
+
+function renderAggregates() {
+  if (!aggData) return;
+  const w = aggData[aggWindow] || emptyWindow();
+  const exclusive = (w.reasons && w.reasons.exclusive_to_other) || 0;
+  const pct = w.total ? (exclusive / w.total) * 100 : 0;
+  document.getElementById("excl-pct").innerHTML =
+    `${pct.toFixed(w.total ? 1 : 0)}<small>%</small>`;
+  document.getElementById("excl-sub").innerHTML =
+    `<code>reason = exclusive_to_other</code> · ${exclusive} / ${w.total}` +
+    ` · would_fill: ${w.would_fill || 0}`;
+
+  document.getElementById("flow-total").textContent = (w.total || 0).toLocaleString();
+  const windowLabel = aggWindow === "last_7d" ? "7d" : "24h";
+  document.getElementById("flow-cap").textContent = `intents observed · persisted ${windowLabel}`;
+
+  renderBars("reasons", new Map(Object.entries(w.reasons || {})), colorFor);
+  renderBars("routes", new Map(Object.entries(w.routes || {})), "var(--other)");
+  renderBars("chains", new Map(Object.entries(w.dest_chains || {})), "var(--margin)");
+
+  const asof = document.getElementById("agg-asof");
+  const t = aggData.computed_at ? new Date(aggData.computed_at) : null;
+  asof.textContent = t && !Number.isNaN(t.getTime())
+    ? `as of ${t.toLocaleTimeString()}`
+    : "";
+}
+
+document.querySelectorAll(".win-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".win-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    aggWindow = btn.dataset.window;
+    renderAggregates();
+  });
+});
+
+// ---- Rendering (throttled to one paint per frame) ---------------------------
+let pending = false;
+function scheduleRender() {
+  if (pending) return;
+  pending = true;
+  requestAnimationFrame(() => { pending = false; render(); });
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function colorFor(reason) { return REASON_COLORS[reason] || "var(--other)"; }
+
+function renderBars(elId, map, color) {
+  const el = document.getElementById(elId);
+  const rows = [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (!rows.length) { el.innerHTML = '<div class="empty">waiting…</div>'; return; }
+  const max = rows[0][1];
+  el.innerHTML = rows.map(([label, n]) => {
+    const w = Math.max(2, Math.round((n / max) * 100));
+    const c = typeof color === "function" ? color(label) : color;
+    return `<div class="bar-row">
+      <span class="bar-label" title="${esc(label)}">${esc(label)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:${c}"></span></span>
+      <span class="bar-val">${n}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderSpark() {
+  const now = Math.floor(Date.now() / 60000);
+  const vals = [];
+  for (let i = SPARK_MINUTES - 1; i >= 0; i--) vals.push(state.minutes.get(now - i) || 0);
+  const max = Math.max(1, ...vals);
+  document.getElementById("spark").innerHTML = vals.map((v) =>
+    `<span class="spark-bar" style="height:${Math.round((v / max) * 100)}%" title="${v}/min"></span>`
+  ).join("");
+  document.getElementById("spark-cap").textContent =
+    `intents / minute · last ${SPARK_MINUTES}m (peak ${max})`;
+}
+
+function fmtTime(rec) {
+  const t = rec.observed_at || rec.as_of;
+  const d = t ? new Date(t) : new Date();
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleTimeString();
+}
+
+function fmtProfit(p) {
+  if (p === null || p === undefined) return '<span style="color:var(--dim)">—</span>';
+  const v = Number(p);
+  const c = v >= 0 ? "var(--fill)" : "var(--excl)";
+  return `<span style="color:${c}">$${v.toFixed(2)}</span>`;
+}
+
+// HOV-2 + BFRAME-1: the profit <td> with a Gross − Gas = Net hover tooltip
+// and an ALWAYS-VISIBLE gas-source tag (not hover-only — a reviewer glancing
+// at the page, not hovering every row, should still see which rung priced the
+// gas). INVARIANT: gross = net + gas, where net is THIS record's
+// expected_profit_usd and gas its gas_usd — both off the same `rec` (DFIX-1),
+// since the router defines net = gross − gas. A skipped intent
+// (expected_profit_usd null → price_unknown / unsupported_chain) gets the bare
+// "—" and no tooltip. gas_source === "static" means the gas number is the
+// static floor (no live RPC/oracle) and may be stale — flagged loudly (⚠);
+// etherscan/feehistory get the same tag, styled neutrally, so the source is
+// legible either way.
+const GAS_SRC_ABBR = { etherscan: "es", feehistory: "fh", static: "static" };
+function profitCell(rec) {
+  const p = rec.expected_profit_usd;
+  if (p === null || p === undefined) return `<td>${fmtProfit(p)}</td>`;
+  const net = Number(p);
+  const gas = Number(rec.gas_usd) || 0;
+  const gross = net + gas;
+  const src = rec.gas_source || "?";
+  const stale = src === "static";
+  const abbr = esc(GAS_SRC_ABBR[src] || src);
+  let tip =
+    `Gross spread  $${gross.toFixed(2)}\n` +
+    `− Gas         $${gas.toFixed(2)}  [${src}]\n` +
+    `──────────────────────\n` +
+    `= Net         $${net.toFixed(2)}`;
+  if (stale) tip += `\n⚠ static estimate — may be stale; set ACROSS_RPC_<chain>`;
+  const cls = stale ? "stale" : "gas-src";
+  const tag = `<span class="${cls}" title="gas source: ${esc(src)}">${stale ? "⚠ " : ""}${abbr}</span>`;
+  return `<td title="${esc(tip)}">${fmtProfit(p)} ${tag}</td>`;
+}
+
+// INVARIANT: every <td> in a row comes from the same record (DFIX-1).
+// One DecisionRecord in, the whole <tr> out. Route, reason, profit and the
+// verify link are all read off the same `rec`, so a row can never splice a
+// route from one record onto a verify link from another. If you add a column,
+// read it off `rec` here — never from a parallel array or a sibling panel's
+// data (e.g. the routes/chains tallies), or rows will desync.
+function feedRow(rec) {
+  const { pair } = parseRoute(rec.route);
+  const reason = esc(rec.reason || "?");
+  const reasonCell = rec.would_fill
+    ? `<span class="badge wf">would_fill</span>`
+    : `<span style="color:${colorFor(rec.reason)}">${reason}</span>`;
+  const link = (typeof rec.verify_url === "string" && rec.verify_url.startsWith("https://"))
+    ? `<a href="${esc(rec.verify_url)}" target="_blank" rel="noopener">tx ↗</a>`
+    : '<span style="color:var(--dim)">—</span>';
+  return `<tr class="${rec.would_fill ? "wf" : ""}">
+      <td style="color:var(--dim)">${esc(fmtTime(rec))}</td>
+      <td class="route">${esc(pair)}</td>
+      <td class="reason">${reasonCell}</td>
+      ${profitCell(rec)}
+      <td>${link}</td>
+    </tr>`;
+}
+
+function renderFeed() {
+  const el = document.getElementById("feed");
+  if (!state.feed.length) {
+    el.innerHTML = '<tr><td class="empty" colspan="5">waiting for intents…</td></tr>';
+    return;
+  }
+  el.innerHTML = state.feed.map(feedRow).join("");
+}
+
+// Session-only render: the live pulse (sparkline) and the recent-feed table.
+// The persisted headline numbers are `renderAggregates()`'s job, called
+// separately (on poll and on each optimistic SSE bump) so a slow/failed
+// aggregates fetch never blanks the feed, and vice versa.
+function render() {
+  renderSpark();
+  renderFeed();
+}
+
+// ---- SSE wiring -------------------------------------------------------------
+function setStatus(text, cls) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+const es = new EventSource("/events");
+es.onopen = () => setStatus("● live", "live");
+es.onerror = () => setStatus("● reconnecting…", "down");
+es.onmessage = (ev) => {
+  try { ingest(JSON.parse(ev.data)); }
+  catch (e) { /* ignore a malformed frame, keep the stream alive */ }
+};
+
+render();
+fetchAggregates();
+setInterval(fetchAggregates, 30000);
+</script>
+</body>
+</html>

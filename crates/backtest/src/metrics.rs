@@ -12,8 +12,8 @@
 
 use std::collections::BTreeMap;
 
-use solver_pricing::StaticGasModel;
-use solver_router::{PriceFeed, QuoteOutcome, RouterV0, StaticPriceFeed};
+use solver_pricing::GasModel;
+use solver_router::{PriceFeed, QuoteOutcome, RouterV0};
 use solver_types::{FillPolicy, NormalizedIntent};
 
 use crate::route_summary::RouteSummary;
@@ -158,14 +158,19 @@ pub struct BacktestOutput {
     pub routes: Vec<RouteSummary>,
 }
 
-/// Run the router + policy over `intents` and aggregate. Async because the gas
-/// model is async (offline in Phase 0, so still deterministic).
-pub async fn compute(
+/// Run the router + policy over `intents` and aggregate. Generic over the price
+/// feed and gas model so the same aggregator serves the static default and the
+/// `--live-prices`/`--live-gas` sources. `prices` is taken by reference so the
+/// one feed value drives both the Router and the realized-margin closure below
+/// without cloning a live cache (see [`solver_router::PriceFeed`] for `&T`).
+/// Async because the gas model is async (offline static stays deterministic).
+pub async fn compute<P: PriceFeed + ?Sized, G: GasModel>(
     intents: &[NormalizedIntent],
-    prices: StaticPriceFeed,
+    prices: &P,
+    gas: G,
     policy: FillPolicy,
 ) -> BacktestOutput {
-    let router = RouterV0::new(prices, StaticGasModel);
+    let router = RouterV0::new(prices, gas);
     let mut m = Metrics { total: intents.len(), ..Default::default() };
     let mut fills: Vec<FillRow> = Vec::new();
     let mut routes: BTreeMap<String, RouteSummary> = BTreeMap::new();
@@ -197,7 +202,10 @@ pub async fn compute(
             .map(|d| d.start_time)
             .unwrap_or(intent.observed_at);
 
-        match router.quote(intent, eval_at).await {
+        // Single shared decision (router.quote + policy.evaluate) — identical
+        // to what the live shadow loop runs, so would_fill means one thing.
+        let decision = router.decide(intent, eval_at, &policy).await;
+        match &decision.outcome {
             QuoteOutcome::Skipped(r) => {
                 *m.skipped.entry(r.as_str().to_string()).or_default() += 1;
             }
@@ -206,7 +214,7 @@ pub async fn compute(
                 if q.expected_profit_usd > 0.0 {
                     m.profitable_quotes += 1;
                 }
-                let (fill, reason) = policy.evaluate(&q);
+                let (fill, reason) = decision.verdict.expect("a quote always has a verdict");
                 *m.fill_reasons.entry(reason.as_str().to_string()).or_default() += 1;
 
                 if fill {
@@ -269,6 +277,8 @@ mod tests {
     use super::*;
     use alloy_primitives::{address, Address, U256};
     use chrono::{Duration, Utc};
+    use solver_pricing::{GasSource, StaticGasModel};
+    use solver_router::{PriceSource, StaticPriceFeed};
     use solver_types::{AssetAmount, ChainId, IntentId, SettlementType, Source, TokenRef, TxRef};
 
     const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -318,7 +328,7 @@ mod tests {
             stable_intent("uniswapx:c", 1_000_000_000, 1_005_000_000, Some(1_000_000_000), true),
         ];
 
-        let out = compute(&intents, prices, policy).await;
+        let out = compute(&intents, &prices, StaticGasModel, policy).await;
         let m = &out.metrics;
         assert_eq!(m.total, 3);
         assert_eq!(m.quoted, 3, "all stable-priced, none skipped");
@@ -377,8 +387,39 @@ mod tests {
     #[tokio::test]
     async fn precision_is_none_without_realized() {
         let intents = vec![stable_intent("uniswapx:x", 1_000_000_000, 990_000_000, None, false)];
-        let out = compute(&intents, StaticPriceFeed::reference(), FillPolicy::default()).await;
+        let out = compute(&intents, &StaticPriceFeed::reference(), StaticGasModel, FillPolicy::default()).await;
         assert_eq!(out.metrics.would_fill, 1);
         assert!(out.metrics.would_fill_precision().is_none());
+    }
+
+    /// LP-6 determinism: wrapping the static feeds in the `PriceSource`/
+    /// `GasSource` dispatch enums must be a pure pass-through — the default
+    /// (static) run is byte-identical to the pre-LP bare-feed path, so CI stays
+    /// deterministic and `--live-*` is the only behaviour change. Same intents,
+    /// two constructions, identical aggregate + per-fill numbers.
+    #[tokio::test]
+    async fn static_sources_match_bare_static_feeds() {
+        let policy = FillPolicy::default();
+        let intents = vec![
+            stable_intent("uniswapx:a", 1_000_000_000, 990_000_000, Some(995_000_000), true),
+            stable_intent("uniswapx:c", 1_000_000_000, 1_005_000_000, None, true),
+        ];
+        let bare = compute(&intents, &StaticPriceFeed::reference(), StaticGasModel, policy).await;
+        let wrapped = compute(
+            &intents,
+            &PriceSource::Static(StaticPriceFeed::reference()),
+            GasSource::Static(StaticGasModel),
+            policy,
+        )
+        .await;
+        assert_eq!(bare.metrics.quoted, wrapped.metrics.quoted);
+        assert_eq!(bare.metrics.would_fill, wrapped.metrics.would_fill);
+        assert_eq!(bare.metrics.fill_reasons, wrapped.metrics.fill_reasons);
+        assert_eq!(bare.metrics.skipped, wrapped.metrics.skipped);
+        assert_eq!(bare.metrics.modeled_profit_usd_sum, wrapped.metrics.modeled_profit_usd_sum);
+        assert_eq!(
+            bare.fills.iter().map(|f| f.modeled_profit_usd).collect::<Vec<_>>(),
+            wrapped.fills.iter().map(|f| f.modeled_profit_usd).collect::<Vec<_>>(),
+        );
     }
 }

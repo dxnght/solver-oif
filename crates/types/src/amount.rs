@@ -66,6 +66,34 @@ pub fn known_decimals(token: TokenRef) -> u8 {
     18 // WETH and unknowns
 }
 
+/// Decimals we can *vouch for*, or `None` when the token is not one we
+/// recognize. Unlike [`known_decimals`] — which guesses the ERC-20 default of
+/// 18 for unrecognized tokens (fine for storage/display, where the raw `U256`
+/// amount is what matters) — this refuses to guess, because **valuation** must
+/// not. Converting a raw amount to whole tokens with the wrong scale silently
+/// fabricates the amount: a 6-decimal token (e.g. bridged USDC.e at
+/// `0x2791…4174`, absent from [`STABLE_ADDRS`]) read as 18 decimals underflows
+/// to ~0, zeroing its USD leg and inflating modeled profit to the full input
+/// notional — the bug behind absurd "would_fill" rows. The Router therefore
+/// skips any leg whose decimals are unknown rather than invent a number
+/// (CLAUDE.md rule #2). Recognized = native (18), a listed stable (6), listed
+/// WBTC (8), or listed WETH (18); extend the tables to cover more honestly.
+pub fn checked_decimals(token: TokenRef) -> Option<u8> {
+    if token.is_native() {
+        return Some(18);
+    }
+    if STABLE_ADDRS.contains(&token.address) {
+        return Some(6);
+    }
+    if WBTC_ADDRS.contains(&token.address) {
+        return Some(8);
+    }
+    if WETH_ADDRS.contains(&token.address) {
+        return Some(18);
+    }
+    None
+}
+
 /// Coarse value class of a token. Drives the Router's static USD pricing and
 /// its confidence in a route: a same-class swap (e.g. stable→stable) sources
 /// at par with no slippage to model, while a cross-class swap (e.g. ETH→USDC)
@@ -182,6 +210,25 @@ mod tests {
         // Native and unrecognised both 18.
         assert_eq!(known_decimals(tok(ChainId::BASE, Address::ZERO)), 18);
         assert_eq!(known_decimals(tok(ChainId::BASE, Address::repeat_byte(0xab))), 18);
+    }
+
+    /// `checked_decimals` is the honest counterpart used for valuation: `Some`
+    /// only for tokens we recognize, `None` otherwise — never the guessed 18
+    /// that silently underflows a 6-decimal amount to ~0. This is the guard
+    /// behind the absurd-profit fix: an unlisted token is skipped, not
+    /// mis-valued. Independent truth (real on-chain decimals + the unknown
+    /// case), not a constant compared with itself.
+    #[test]
+    fn checked_decimals_refuses_to_guess() {
+        // Recognized tokens resolve to their real scale.
+        assert_eq!(checked_decimals(tok(ChainId::BASE, address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"))), Some(6)); // USDC
+        assert_eq!(checked_decimals(tok(ChainId::BASE, address!("4200000000000000000000000000000000000006"))), Some(18)); // WETH
+        assert_eq!(checked_decimals(tok(ChainId::ETHEREUM, address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"))), Some(8)); // WBTC
+        assert_eq!(checked_decimals(tok(ChainId::BASE, Address::ZERO)), Some(18)); // native
+        // Unrecognized → None. Bridged USDC.e on Polygon is NOT in STABLE_ADDRS,
+        // so it lands here until added — exactly the case that zeroed the output.
+        assert_eq!(checked_decimals(tok(ChainId::POLYGON, address!("2791Bca1f2de4661ED88A30C99A7a9449Aa84174"))), None);
+        assert_eq!(checked_decimals(tok(ChainId::BASE, Address::repeat_byte(0x42))), None);
     }
 
     /// Classification maps a representative deployment of each class to the

@@ -14,6 +14,16 @@ pub trait PriceFeed: Send + Sync {
     fn usd_price(&self, token: TokenRef) -> Option<f64>;
 }
 
+/// Forward `PriceFeed` through a shared reference. Lets one feed value serve
+/// both as the Router's owned feed and the backtest's realized-margin price
+/// closure without cloning a live cache: the backtest passes `&feed` to
+/// `compute`, which builds `RouterV0::new(&feed, …)` and still reads `feed`.
+impl<T: PriceFeed + ?Sized> PriceFeed for &T {
+    fn usd_price(&self, token: TokenRef) -> Option<f64> {
+        (**self).usd_price(token)
+    }
+}
+
 /// Static price feed. Stables resolve to $1 (genuinely near-peg); ETH/BTC use
 /// the configured reference values; the native gas token resolves per chain.
 /// Anything else (an unrecognised ERC-20) returns `None`.

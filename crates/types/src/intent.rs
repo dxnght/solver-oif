@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::amount::{AssetAmount, TokenRef};
+use crate::amount::{checked_decimals, AssetAmount, TokenRef};
 use crate::chain::ChainId;
 use crate::settlement::SettlementType;
 
@@ -152,7 +152,20 @@ impl NormalizedIntent {
     /// is the right reference for "could an independent filler have profited
     /// here?" — compare against [`crate::FillPolicy::min_margin_usd`]
     /// (would_fill calibration, WFC-2). Returns `None` when there is no
-    /// realized output OR when either token's price is unknown.
+    /// realized output, when either token's price is unknown, OR when either
+    /// token's decimals are unknown.
+    ///
+    /// The decimals guard applies the same discipline as the Router's modeled
+    /// leg ([`checked_decimals`]): valuation must not guess a scale. The stored
+    /// `AssetAmount.decimals` is an ingest convenience that falls back to the
+    /// ERC-20 default of 18, so reading a 6-decimal realized amount as 18-dp
+    /// would underflow it to ~0 and fabricate a full-notional "realized margin"
+    /// — garbage drift in the backtest metric. Re-derive from recognized tokens
+    /// and return `None` rather than invent a number (CLAUDE.md rule #2). Today
+    /// the consumed drift path only reaches here for router-quoted intents
+    /// (whose legs are already recognized), but this method is public and also
+    /// backs the `with_realized` count over *every* intent — so it must be
+    /// honest on its own, not by relying on an upstream skip.
     pub fn realized_gross_margin_usd<F>(&self, price: F) -> Option<f64>
     where
         F: Fn(TokenRef) -> Option<f64>,
@@ -160,7 +173,12 @@ impl NormalizedIntent {
         let realized = self.realized_output.as_ref()?;
         let p_in = price(self.input.token)?;
         let p_out = price(realized.token)?;
-        Some(self.input.to_f64() * p_in - realized.to_f64() * p_out)
+        let in_dec = checked_decimals(self.input.token)?;
+        let out_dec = checked_decimals(realized.token)?;
+        let input_usd = AssetAmount::new(self.input.token, self.input.amount, in_dec).to_f64() * p_in;
+        let realized_usd =
+            AssetAmount::new(realized.token, realized.amount, out_dec).to_f64() * p_out;
+        Some(input_usd - realized_usd)
     }
 }
 
@@ -175,10 +193,14 @@ fn short_addr(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::Address;
+    use alloy_primitives::{address, Address};
 
+    /// Real Arbitrum-native USDC (6 decimals, in `STABLE_ADDRS`), so
+    /// `checked_decimals` resolves it — a recognized token is exactly what the
+    /// realized valuation now requires. Using the true address keeps the
+    /// margin fixtures honest (independent truth, rule #3), not a placeholder.
     fn usdc() -> TokenRef {
-        TokenRef::new(ChainId::ARBITRUM, Address::repeat_byte(0x11))
+        TokenRef::new(ChainId::ARBITRUM, address!("af88d065e77c8cC2239327C5EDb3A432268e5831"))
     }
 
     fn make_intent(realized_units: Option<u64>) -> NormalizedIntent {
@@ -220,6 +242,31 @@ mod tests {
     fn realized_gross_margin_returns_none_when_price_missing() {
         let intent = make_intent(Some(999_000));
         assert!(intent.realized_gross_margin_usd(|_| None).is_none());
+    }
+
+    /// The realized valuation obeys the same checked-decimals discipline as the
+    /// Router's modeled leg: an unrecognized token — whose decimals we cannot
+    /// vouch for — yields `None`, never a fabricated margin, **even when a price
+    /// is available** (as a live feed can supply one by contract address).
+    /// Reading its raw amount with the stored 18-dp ingest fallback would
+    /// underflow a 6-dp realized amount to ~0 and print the full input as
+    /// "realized margin" (garbage drift); refusing to guess keeps that out of
+    /// the backtest metric (CLAUDE.md rule #2). Independent truth: a real
+    /// recognized input vs an unlisted realized token, priced but unscalable.
+    #[test]
+    fn realized_gross_margin_none_for_unknown_decimals_realized_token() {
+        let mystery = TokenRef::new(ChainId::ARBITRUM, Address::repeat_byte(0x42));
+        let mut intent = make_intent(Some(999_000));
+        // A 6-dp amount stored with the ingest fallback of 18 — the exact shape
+        // that would underflow to ~0 and fabricate a full-notional margin.
+        intent.realized_output =
+            Some(AssetAmount::new(mystery, U256::from(999_000u64), 18));
+        // Every token is priced at $1 — a price is not enough; we also need to
+        // trust the scale, and for this token we do not.
+        assert!(
+            intent.realized_gross_margin_usd(|_| Some(1.0)).is_none(),
+            "priced-but-unrecognized realized token must not fabricate a margin"
+        );
     }
 
     /// VL-1: without a `tx_ref`, there's nothing to link to. Must be `None`,

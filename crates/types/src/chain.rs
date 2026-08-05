@@ -12,6 +12,7 @@ pub struct ChainId(pub u64);
 impl ChainId {
     pub const ETHEREUM: ChainId = ChainId(1);
     pub const OPTIMISM: ChainId = ChainId(10);
+    pub const BSC: ChainId = ChainId(56);
     pub const POLYGON: ChainId = ChainId(137);
     pub const ZKSYNC: ChainId = ChainId(324);
     pub const WORLDCHAIN: ChainId = ChainId(480);
@@ -44,6 +45,7 @@ impl ChainId {
         match self.0 {
             1 => "ethereum",
             10 => "optimism",
+            56 => "bsc",
             130 => "unichain",
             137 => "polygon",
             143 => "monad",
@@ -69,6 +71,44 @@ impl ChainId {
             7777777 => "zora",
             _ => "unknown",
         }
+    }
+
+    /// Inverse of [`Self::name`]: resolve a (case-insensitive) chain name to its
+    /// id, or `None` for an unknown name. Used to parse the `solver live
+    /// --chains base,arbitrum,…` list; callers surface a loud error on `None`
+    /// rather than silently dropping a chain (legibility). Kept in lockstep with
+    /// `name()` by [`tests::from_name_roundtrips_named_chains`].
+    pub fn from_name(name: &str) -> Option<ChainId> {
+        let c = match name.trim().to_ascii_lowercase().as_str() {
+            "ethereum" => Self::ETHEREUM,
+            "optimism" => Self::OPTIMISM,
+            "bsc" => Self::BSC,
+            "unichain" => Self::UNICHAIN,
+            "polygon" => Self::POLYGON,
+            "monad" => Self::MONAD,
+            "lens" => Self::LENS,
+            "boba" => Self::BOBA,
+            "zksync" => Self::ZKSYNC,
+            "worldchain" => Self::WORLDCHAIN,
+            "redstone" => Self::REDSTONE,
+            "hyperevm" => Self::HYPEREVM,
+            "polygon-zkevm" => Self::POLYGON_ZKEVM,
+            "lisk" => Self::LISK,
+            "soneium" => Self::SONEIUM,
+            "megaeth" => Self::MEGAETH,
+            "mantle" => Self::MANTLE,
+            "base" => Self::BASE,
+            "plasma" => Self::PLASMA,
+            "mode" => Self::MODE,
+            "arbitrum" => Self::ARBITRUM,
+            "ink" => Self::INK,
+            "linea" => Self::LINEA,
+            "blast" => Self::BLAST,
+            "scroll" => Self::SCROLL,
+            "zora" => Self::ZORA,
+            _ => return None,
+        };
+        Some(c)
     }
 
     /// Best-effort: is this chain an L2/L3 (i.e. not Ethereum mainnet)?
@@ -140,7 +180,7 @@ mod tests {
     #[test]
     fn named_chains_resolve() {
         let named = [
-            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::POLYGON, ChainId::ZKSYNC,
+            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::BSC, ChainId::POLYGON, ChainId::ZKSYNC,
             ChainId::WORLDCHAIN, ChainId::REDSTONE, ChainId::BOBA, ChainId::LISK,
             ChainId::POLYGON_ZKEVM, ChainId::MODE, ChainId::MANTLE, ChainId::BASE,
             ChainId::ARBITRUM, ChainId::ZORA, ChainId::SCROLL, ChainId::LINEA,
@@ -151,6 +191,31 @@ mod tests {
         for c in named {
             assert_ne!(c.name(), "unknown", "chain id {} has no name() arm", c.0);
         }
+    }
+
+    /// `from_name` is the exact inverse of `name()` for every named chain, is
+    /// case-insensitive, and returns `None` for an unknown name (so the CLI
+    /// can error loudly instead of silently dropping it). Reuses the same
+    /// named set as [`named_chains_resolve`] — one drifts, both fail.
+    #[test]
+    fn from_name_roundtrips_named_chains() {
+        let named = [
+            ChainId::ETHEREUM, ChainId::OPTIMISM, ChainId::BSC, ChainId::POLYGON, ChainId::ZKSYNC,
+            ChainId::WORLDCHAIN, ChainId::REDSTONE, ChainId::BOBA, ChainId::LISK,
+            ChainId::POLYGON_ZKEVM, ChainId::MODE, ChainId::MANTLE, ChainId::BASE,
+            ChainId::ARBITRUM, ChainId::ZORA, ChainId::SCROLL, ChainId::LINEA,
+            ChainId::BLAST, ChainId::INK, ChainId::LENS, ChainId::SONEIUM,
+            ChainId::UNICHAIN, ChainId::HYPEREVM, ChainId::MONAD, ChainId::MEGAETH,
+            ChainId::PLASMA,
+        ];
+        for c in named {
+            assert_eq!(ChainId::from_name(c.name()), Some(c), "round-trip {}", c.0);
+        }
+        // Case-insensitive and whitespace-trimmed (CLI input is human).
+        assert_eq!(ChainId::from_name("  Arbitrum "), Some(ChainId::ARBITRUM));
+        assert_eq!(ChainId::from_name("BASE"), Some(ChainId::BASE));
+        // Unknown → None (caller errors loudly, never a silent drop).
+        assert_eq!(ChainId::from_name("not-a-chain"), None);
     }
 
     #[test]

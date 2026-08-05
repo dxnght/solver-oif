@@ -16,6 +16,13 @@ solver-router    = { workspace = true }
 solver-backtest  = { workspace = true }
 anyhow           = { workspace = true }
 clap             = { workspace = true }
-tokio            = { workspace = true }
+reqwest          = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+chrono           = { workspace = true }
+tokio            = { workspace = true, features = ["net", "io-util"] }
 tracing          = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+alloy-primitives = { workspace = true }

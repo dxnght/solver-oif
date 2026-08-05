@@ -1,0 +1,43 @@
+# Caddyfile — public TLS front for the intent-flow dashboard (BNET-1).
+#
+# The solver binds the dashboard on 127.0.0.1:8088 (loopback only — it is never
+# directly reachable from the internet). Caddy is the ONLY public listener; it
+# terminates TLS (automatic Let's Encrypt) and reverse-proxies to loopback.
+#
+# Replace `intents.example.com` with your domain, whose A/AAAA record must point
+# at this VPS, with ports 80 and 443 reachable (Caddy needs 80 for the ACME
+# challenge and 443 to serve). Then: `caddy reload --config /etc/caddy/Caddyfile`.
+
+intents.example.com {
+	# --- SSE stream: no compression, flush every write, long-lived. --------
+	# A buffering/compressing proxy would stall Server-Sent Events. `handle`
+	# blocks are mutually exclusive and ordered, so /events is served here
+	# (raw, flushed immediately) and never falls through to the encoded block.
+	handle /events {
+		reverse_proxy 127.0.0.1:8088 {
+			flush_interval -1
+		}
+	}
+
+	# --- Everything else: the page + /healthz, with compression. -----------
+	handle {
+		encode zstd gzip
+		reverse_proxy 127.0.0.1:8088
+	}
+
+	# Health probe target for uptime monitoring (the app answers 200 "ok").
+	# e.g. point an external monitor at https://intents.example.com/healthz
+
+	# Modest hardening. The dashboard is read-only public data, so no auth;
+	# these headers are just good hygiene for a public page.
+	header {
+		-Server
+		Referrer-Policy "no-referrer"
+		X-Content-Type-Options "nosniff"
+	}
+
+	log {
+		output file /var/log/caddy/intents.log
+		format json
+	}
+}

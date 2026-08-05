@@ -69,7 +69,7 @@ mod tests {
     use crate::amount::{AssetAmount, TokenRef};
     use crate::chain::ChainId;
     use crate::intent::IntentId;
-    use crate::quote::{Route, SignedAmount};
+    use crate::quote::{GasOrigin, Route, SignedAmount};
     use alloy_primitives::{Address, U256};
     use chrono::Utc;
 
@@ -87,6 +87,7 @@ mod tests {
             expected_profit: SignedAmount::zero(tok(), 6),
             expected_profit_usd: profit_usd,
             gas_usd: 0.0,
+            gas_source: GasOrigin::Static,
             confidence,
             valid_until: Utc::now(),
         }

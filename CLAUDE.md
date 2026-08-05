@@ -35,7 +35,7 @@ Rust workspace, 6 крейтів + live-підсистема + дашборд. �
 | `pricing` | газ (`gas`/`fee_history_gas`), сорсинг (`odos`), offline |
 | `router` | **серце edge** (`v0`): asset-class routing, decay, confidence, `QuoteOutcome`/`SkipReason`; ціни (`prices`/`live_prices`) |
 | `backtest` | `load` (dedup+hygiene), `metrics` (+ would_fill-калібрування), `report`, `dest_summary` |
-| `cli` | бінар `solver`: `main`, `live`, `dashboard`, `report_live`, `doctor`, `calibrate` |
+| `cli` | бінар `solver`: модулі `main`, `live`, `dashboard` (+ `dashboard.html`, `about.html`), `aggregates`, `doctor`. Сабкоманди: `ingest`, `backtest`, `live`, `doctor` |
 
 Потік: discovery → eligibility → router(quote) → **FillPolicy** (bid-рішення) →
 [Фаза 1: shadow-лог] / [Фаза 2: executor — припарковано] → settlement-watcher.

@@ -1,0 +1,56 @@
+# solver-live.service — run the live intent-flow shadow + dashboard 24/7 (BRESIL-1).
+#
+# Install:
+#   sudo cp deploy/solver-live.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now solver-live
+#   journalctl -u solver-live -f        # follow logs
+#
+# One process does both jobs: the live loop (subscribes to Across deposits,
+# quotes each, appends decisions JSONL) AND the dashboard on 127.0.0.1:8088.
+# No --duration, so it runs until stopped; Restart=on-failure covers crashes;
+# the WS layer already reconnects across transient node drops with backoff.
+
+[Unit]
+Description=Solver Engine — live intent-flow shadow + dashboard (zero transactions)
+Documentation=https://github.com/dxnght
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solver
+Group=solver
+WorkingDirectory=/opt/solver
+
+# Secrets (RPC/WS URLs, ETHERSCAN_API_KEY) live here, server-side only. They are
+# read into the process env and NEVER served by the dashboard (which emits only
+# public decision records). chmod 600, owned by the solver user.
+EnvironmentFile=/opt/solver/solver.env
+
+# Unbounded live run. Across is the only wired real-time source; add chains as
+# their ACROSS_WS_<CHAIN> are set. Writes to reports/live/*.jsonl.
+ExecStart=/opt/solver/bin/solver live \
+    --chains base,arbitrum,optimism \
+    --sources across \
+    --dashboard-port 8088 \
+    --out reports/live
+
+Restart=on-failure
+RestartSec=5
+# Don't thrash on a persistent failure (e.g. a bad key): 5 starts / 60s, then stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# --- Hardening: least privilege for a public-facing service. ---------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# The only writable paths: where it appends data and reports.
+ReadWritePaths=/opt/solver/reports /opt/solver/data
+# It only needs loopback + outbound (WS/RPC/HTTP); no listening on public ifaces.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

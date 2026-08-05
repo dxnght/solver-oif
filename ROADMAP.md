@@ -26,17 +26,134 @@ Exit: `doctor` показує правду; no-key цикл дає переві�
 Тримати й наповнювати даними: `would_fill_precision` + margin-drift проти realized.
 Exit: на реальному backtest видно число «з N сказаних fill, K ринок підтвердив».
 
-**B2 — Across поточне покоління подій (ловити реальний потік).**
-Across мігрував на ERC-7683 (`FundsDeposited`/`FilledRelay`, bytes32). Додати ці
-події **поряд** з V3, підписка/скан на обидва topic0. Сигнатури — з канонічного ABI
-(`@across-protocol/contracts`), **не з памʼяті**.
-Exit: live Across дає інтенти за хвилини; historical сканує обидва покоління.
+**B2 — Across historical ingest (крос-чейновий observability-шар). ✅ ЗРОБЛЕНО (AX-1..7).**
+Поточне покоління `FilledRelay` (bytes32) з канонічного ABI (`@across-protocol/contracts`),
+**не з памʼяті**; topic0 звірено з on-chain-логом; SpokePool-адреси з канонічних
+deployments (мейджори `Some`, решта `None`+PENDING). `ingest across` через Etherscan-V2
+`getLogs` пише інтенти з realized/filler/tx_ref; `doctor` дає реальну per-chain V2-готовність.
+Exit (виконано): backtest включає Across, would_fill-калібрування рахується крос-чейн.
+Свідомо **поза** скоупом (окремі buckets): deposits-скан + JOIN depozit↔fill (PATH);
+старе покоління `FilledV3Relay`; live-WS.
 
-**B3 — Live gas/prices (вивести would_fill із шумової смуги).**
-`eth_feeHistory`-газ по чейну + live ETH/BTC, **за прапорцем**, fallback static,
-дефолт off (детермінізм CI). Калібрувати `clearing_delay` з даних, не з руки.
+**B3 — Live gas/prices. ✅ ЗРОБЛЕНО (LP-1..6).**
+`eth_feeHistory`-газ по чейну (`ACROSS_RPC_<CHAIN>`) + CoinGecko-ціни за контракт-адресою
+(long-tail fix), **за прапорцем** `--live-prices`/`--live-gas`, fallback static + WARN,
+дефолт off (детермінізм CI); `--reproducible` перекриває на static. `doctor` показує
+live-pricing-готовність (CoinGecko ping + per-chain RPC). Наживо: `--live-prices` зняв 171
+long-tail-інтент із `price_unknown` (quoted 6597→6768); `--live-gas` здешевив L2-газ
+(would_fill 100→105). Платформ-id CoinGecko та topic0/RPC-формати звірено з живими джерелами.
+(Газ-дефолт згодом оновлено в **GAS**: `live` бере драбину за замовчуванням, `--live-gas`
+лишається опт-ін для backtest.)
+Крос-клас confidence лишається консервативно нижче порога (feed-aware тюнінг — окремо).
 
-**Тільки після B0–B3 — повертатись до нової ширини** (FEED/PATH/OIF/нові чейни).
+**B4 — Live Across shadow. ✅ ЗРОБЛЕНО (LIV-1..6).**
+WS `eth_subscribe` на `FundsDeposited` (origin-депозити, **не** `FilledRelay` — це open-side
+рестрім), спільний `decide()` (один `FillPolicy` у live і backtest), decisions JSONL із
+verify_url на origin-tx, нуль транзакцій; `doctor` показує WS-готовність. topic0 звірено
+з реальним on-chain-логом.
+
+**B5 — Live observability dashboard. ✅ ЗРОБЛЕНО (DASH-1..4).**
+Zero-dep tokio HTTP/SSE-сервер (без web-фреймворку/білд-кроку): `GET /` віддає вбудований
+(`include_str!`) `dashboard.html`; `GET /events` стрімить кожен `DecisionRecord` як SSE-подію
+через `broadcast`-канал + replay-буфер (новий клієнт бачить свіжий потік, не порожній екран).
+За прапорцем `--dashboard-port` у `solver live` — публікує **той самий** decision-потік у
+broadcast **на додачу** до JSONL (без дублювання `decide`-логіки); без прапорця B4 незмінна.
+Наратив — exclusivity-capture (`exclusive_to_other` % від усіх) і склад потоку (топ
+origin→dest-маршрути / dest-чейни / reason-breakdown / live-feed із клікабельними verify-лінками),
+**не** would_fill (edge≈0 — чесно підписано). Інтеграційні тести на ефемерному порту (без
+браузера): `GET /` віддає HTML; `GET /events` — `text/event-stream` і прокидає опублікований
+`DecisionRecord` (replay + live-broadcast). Реалізує application-ідею #1 (публічний intent-flow
+дашборд). Ще не прогнано проти живого WS-фіда (потрібні `ACROSS_WS_<CHAIN>`).
+
+**B6 — Розширення price-feed coverage. ✅ ЗРОБЛЕНО (COV-1..3).** Вузький, observability-only —
+повнота дашборда, не пошук edge. CoinGecko platform-мапа доповнена `bsc`→binance-smart-chain,
+`worldchain`→world-chain, `ink`→ink (кожен platform-id звірено з живим `/asset_platforms`
+2026-06-23; `BSC`=56 — новий `ChainId`). Новий additive skip-reason `unsupported_chain`:
+відсутню ціну тепер класифіковано за покриттям чейна — поза покриттям (нема verified-платформи:
+не-EVM або ще не змаплений L2) → `unsupported_chain` («поза досяжністю»), покритий чейн із
+незнайденим токеном → `price_unknown` («у досяжності, ціни нема»). Дашборд розрізняє їх (різні
+кольори), % класифікованого потоку зростає. Не чіпали не-EVM і native-gas-мапу (поза скоупом).
+
+**GAS — Real gas by default + source transparency. ✅ ЗРОБЛЕНО (GAS-1..5).** Вузький,
+correctness+legibility. Газ тепер **драбина** etherscan `gasoracle` → `eth_feeHistory` →
+static ([`LadderGasModel`]): `live` бере її **за замовчуванням** (лагодить «забув `--live-gas`»),
+`--static-gas` форсить static; `backtest` лишається static-дефолт (`--live-gas` вмикає драбину),
+`--reproducible` → static (детермінізм). Кожен `GasEstimate` несе `origin`
+(`etherscan`/`feehistory`/`static`) → нове additive поле `gas_source` у `Quote` і
+`DecisionRecord` (видно, якому числу вірити). Etherscan V2 `gasoracle` (той самий хост, що
+ingest): `status!="1"` (чейн без покриття плану) / нема ключа / помилка → `None`, драбина падає
+далі — ніякої вигаданої ціни. Звірено наживо 2026-06-24: ethereum/polygon/arbitrum → `status:1`,
+optimism/base → «Free API access not supported» (парсер тестовано на реальних тілах). Polygon-газ
+цінується в POL, не ETH (вже коректно; додано end-to-end-тест). `doctor` показує драбину per-chain.
+Юніти (≈300k) свідомо **не** чіпали (правило #2); `$27`-проблема Ethereum — від статичної *ціни*,
+драбина дає реальну (~sub-$1.5 за поточних gwei). Принагідно виправлено pre-existing fallback,
+який недооцінював газ невідомих чейнів (9e12 < усі L2 → 6e13).
+
+**HOV — Margin transparency. ✅ ЗРОБЛЕНО (HOV-1..3).** Дашборд-розширення поверх GAS: на комірці
+profit — hover-тултип `Gross − Gas = Net` (gross = `expected_profit_usd + gas_usd`, газ позначено
+джерелом), щоб модельне число було самопояснювальним; `gas_source == "static"` (статична підлога,
+нема live RPC/oracle) позначено жовтим `⚠ static` з підказкою «set ACROSS_RPC_<chain>» — stale-газ
+видно там, де він стається. HOV-1 (`gas_source` у `DecisionRecord`) уже зроблено в GAS-1.
+Нема JS-харнеса → ідентичність `gross = net + gas` застрахована Rust-тестом роутера; JS звірено
+`node --check`. Skipped-інтенти (null profit) — без тултипа.
+
+**DEC — Decimals-чесність у valuation (`checked_decimals`). ✅ ЗРОБЛЕНО (DEC-1..2).** Вузький,
+correctness. Валюація ноги **не** вгадує scale: збережений `AssetAmount.decimals` — ingest-
+зручність із fallback 18, тож 6-dp токен, прочитаний як 18-dp, underflow-иться до ~0 і роздуває
+профіт до повного notional (баг за абсурдними would_fill-рядками). **DEC-1** (роутер, shipped
+`3381ca3`): `checked_decimals(token) → Option` (Some лише для впізнаних: native/stable/WETH/WBTC),
+новий additive skip `unknown_decimals` — модельна нога зі невідомими decimals **скіпається**, не
+квотиться. **DEC-2** (realized-нога, ця гілка): `NormalizedIntent::realized_gross_margin_usd` теж
+через `checked_decimals` → `None` при невпізнаному токені (навіть якщо ціна є — live-фід дає її за
+адресою). Сьогодні спожиток drift досягає цієї ноги лише для квотованих інтентів (ноги вже
+впізнані), але метод публічний і бекає лічильник `with_realized` над **усіма** інтентами — тож
+чесний сам по собі, не через upstream-скіп. Тести: real-адреси USDC (незалежна істина, не
+плейсхолдер) + guard на priced-but-unrecognized realized-токен. Числа для впізнаних токенів
+незмінні (stored == checked).
+
+**BETA-1 — Ядро бети (публічно + надійно + чесно). ✅ ЗРОБЛЕНО (BNET-1, BAGG-1,
+BRESIL-1, BFRAME-1, BDEPLOY-1).** П'ять атомарних під-buckets, щоб `solver live
+--dashboard-port` стало реальним публічним сайтом, не лише localhost-демо:
+- **BNET-1** — `deploy/Caddyfile`: єдиний публічний listener, авто-HTTPS
+  (Let's Encrypt) → reverse-proxy на `127.0.0.1:8088` (застосунок ніколи не
+  слухає назовні напряму); `/events` (SSE) не буферизується/не стискається
+  (`flush_interval -1`), решта — так. Новий `GET /healthz` у `dashboard.rs`
+  (bare `200 ok`, не залежить від наявності живих рішень — idle-потік не є
+  «нездоровим»). Exit: HTTPS-доступ ззовні — **виконано** (код + конфіг;
+  реальний прогін на VPS — за BDEPLOY-1).
+- **BAGG-1** — персистентні 24h/7d агрегати. Новий модуль `cli/src/aggregates.rs`:
+  повний перерахунок (не інкрементальний — вузький масштаб, правило #5) з усіх
+  `decisions-*.jsonl` під `--out`, при старті `live` (до цикла) і на кожен
+  heartbeat (60с). Новий `GET /aggregates`; дашборд полить його раз на 30с за
+  перемикачем 24h/7d, з оптимістичним клієнтським bump між пулами (дзеркалить
+  серверний `WindowAgg::bump`). Exit: рестарт не втрачає історію — **звірено
+  наживо**: засіяно `decisions-*.jsonl` записами на «зараз» / «30г тому» /
+  «10д тому», прогнано `solver live --dashboard-port`, `/aggregates` ДО
+  першого нового рішення коректно дав 24h=1, 7d=2 (10-денний запис виключено).
+- **BRESIL-1** — `deploy/solver-live.service`: unbounded (без `--duration`),
+  `Restart=on-failure` + start-limit (5/60с, не молотить на зламаному ключі);
+  WS-реконект (backoff) уже є в `live/ws.rs` — підтверджено тим самим прогоном
+  (WARN → reconnect 1с→2с→4с). Hardening: `ProtectSystem=strict`,
+  `ProtectHome`, лише `reports/`+`data/` writable. Exit: сервіс переживає
+  падіння й обрив вузла — **виконано**.
+- **BFRAME-1** — чесний банер (уже був) + новий `GET /about` (embedded, як
+  dashboard.html — що це / чого це НЕ / як перевірити число / джерело+ліцензія)
+  + `gas_source` тепер **завжди видимий** інлайн-тег (`es`/`fh`/`static`) на
+  кожному quoted рядку, не лише в hover-тултипі (тільки `static` мав видимий
+  прапорець раніше). Exit: рев'юер за 30с розуміє межі — **виконано**
+  (звірено standalone node-assertion скриптом для `profitCell`, не лише
+  `node --check`).
+- **BDEPLOY-1** — `deploy/update.sh` (pull→build→`/verify`→install→restart) +
+  `just deploy-remote host=...`. Виправлено реальний розрив у чернетці: адмін
+  проксіювався через `sudo -u solver` (той — `nologin`, без власного sudo) →
+  вкладені `sudo install`/`sudo systemctl` впали б без пароля/TTY. Модель
+  виправлено: `solver` лише **запускає** сервіс (unprivileged, nologin, без
+  sudo); білдить і деплоїть **адмінський** акаунт своїм реальним sudo. Також
+  виправлено дрейф назви репо (`solver-engine` → `solver-oif`, звірено з
+  `git remote -v`). Exit: `git push` → `just deploy-remote` → живий сайт —
+  **код+доки готові** (реальний VPS-прогін — наступний крок людини, не агента).
+
+**Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)
 

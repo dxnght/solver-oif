@@ -22,7 +22,7 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
 
 ## Що працює (B0 verified core — реалізовано й перевірено наскрізно)
 Чистий рестарт пройшов наскрізний no-key цикл `ingest uniswapx → backtest → звіт`:
-- **6-крейтова основа зелена**: `build + clippy -D warnings + test` (44 тести,
+- **6-крейтова основа зелена**: `build + clippy -D warnings + test` (61 тест,
   поведінкові/property, не тавтологічні). Компілятор — істина.
 - **RouterV0** — `NormalizedIntent → Quote/Skip`: економіка філлера в USD,
   asset-class confidence, Dutch-decay, `QuoteOutcome`/`SkipReason`.
@@ -37,7 +37,15 @@ JIT ≠ $0 капіталу (філлер авансує output, рефанд з
   усереднений.
 - **Verify-links** — `TxRef` → block-explorer; лише верифіковані домени, `None`/`—` для
   невідомих. У звіті кожен fill несе клікабельний tx-лінк.
-- **`solver doctor`** — read-only preflight без мережі: каже, що дасть дані до прогону.
+- **`solver doctor`** — read-only preflight: статика без мережі + **реальна Etherscan-V2
+  per-chain проба** для Across (DATA-OK / NO-V2 / NEEDS-KEY), каже, що дасть дані до прогону.
+- **Across historical ingest (B2)** — крос-чейновий observability-шар: поточне покоління
+  `FilledRelay` (bytes32) з канонічного `@across-protocol/contracts`-ABI; topic0 звірено
+  з реальним on-chain-логом; SpokePool-адреси з канонічних deployments (5 мейджорів `Some`,
+  решта `None`+PENDING). `ingest across` пише інтенти з наповненими
+  `realized_output`/`winning_filler`/`tx_ref`; backtest тепер рахує **would_fill-калібрування
+  крос-чейн** (drift ≈ похибка static-входів — очікувано, бо маржа фіксована депозитом, без
+  Dutch-аукціону). Free Etherscan-ключ покриває не всі чейни — `doctor` каже це гучно.
 
 **Емпіричний урок (записано в spec §0):** на static-цінах would_fill на **волатильних**
 маршрутах давав фантомний edge ($1.18M «прибутку», 94% «precision») — артефакт
@@ -49,9 +57,10 @@ static-ціни (та ще й тавтологічної: модель і realiz
 - 🔴 **OIF InputSettler-адреса хардкоднута й НЕВЕРИФІКОВАНА** (`live/oif/deployments.rs`):
   коментар посилається на `DEPLOYMENTS.md`, якого в репо OIF немає; «тест» —
   тавтологія. **Не довіряти, поки не звірено on-chain.** Тримати OIF idle.
-- 🟠 **Across-події застаріли на покоління**: адаптери лише `V3FundsDeposited`/
-  `FilledV3Relay`; Across мігрував на `FundsDeposited`/`FilledRelay` (bytes32). Live
-  може бути сліпий до частини потоку → bucket B2.
+- ✅ **Across-події (історичні) на поточному поколінні** — закрито в B2: ingest читає
+  `FilledRelay` (bytes32) з канонічного ABI. ✅ **live-WS-адаптер — закрито в B4**
+  (`eth_subscribe` на `FundsDeposited`-депозити). Лишається: JOIN depozit↔fill
+  (PATH, окремий bucket).
 - 🟡 **Дрейф ширини**: додано FEED/PATH/OIF замість консолідації (doctor/B2). Заморозити.
 - **Компіляція не підтверджена незалежним аудитом** (потрібні build/test-логи).
 
@@ -60,11 +69,52 @@ static-ціни (та ще й тавтологічної: модель і realiz
 2. ✅ **B1 — would_fill-калібрування поглиблене**: net↔net margin-drift + розподіл,
    дві precision, per-route summary, top-10 worst-drift — **зроблено** (WFC-5..8).
    (`dest_summary` — окремо, за потреби.)
-3. **B2 (наступне)** — поточні Across-події + Etherscan-V2 проба в `doctor` (відкладена з B0:
-   немає Across-шляху, що споживає V2 block-times — не будувати передчасну ширину).
-4. **B3** — live gas/prices; тоді крос-клас confidence стає feed-aware (зараз навмисно
-   нижче порога на static-цінах).
-5. Тільки тоді — нова ширина (FEED/PATH/OIF після on-chain-підтвердження адреси).
+3. ✅ **B2 — Across historical ingest + Etherscan-V2 проба в `doctor`**: поточне покоління
+   `FilledRelay`, калібрування побігло крос-чейн — **зроблено** (AX-1..7).
+4. ✅ **B4 — live Across shadow**: WS `eth_subscribe` на `FundsDeposited` (origin-депозити),
+   спільний `decide()` (один `FillPolicy` у live і backtest), decisions JSONL із verify_url,
+   нуль транзакцій; `doctor` показує WS-готовність — **зроблено** (LIV-1..6).
+5. ✅ **B3 — live gas/prices**: CoinGecko-ціни за контракт-адресою (long-tail) +
+   `eth_feeHistory`-газ (`ACROSS_RPC_<CHAIN>`), за прапорцем `--live-prices`/`--live-gas`,
+   fallback static, дефолт off (детермінізм CI), `--reproducible` перекриває — **зроблено**
+   (LP-1..6). Наживо: `--live-prices` зняв 171 long-tail-інтент із `price_unknown`
+   (quoted 6597→6768); `--live-gas` здешевив L2-газ (would_fill 100→105). Крос-клас
+   confidence лишається консервативно нижче порога (feed-aware тюнінг — можливий наступний крок).
+6. ✅ **B5 — live observability dashboard**: zero-dep tokio HTTP/SSE-сервер за прапорцем
+   `--dashboard-port` у `solver live` — стрімить **той самий** `DecisionRecord`-потік
+   (broadcast + replay-буфер) у вбудований vanilla-JS дашборд; наратив — exclusivity-capture
+   і склад потоку (маршрути/dest-чейни/reason/feed із verify-лінками), не would_fill;
+   без прапорця B4 незмінна — **зроблено** (DASH-1..4). Реалізує application-ідею #1.
+   Ще не прогнано проти живого WS-фіда (`ACROSS_WS_<CHAIN>`).
+7. ✅ **B6 — розширення price-feed coverage** (вузький, observability-only): CoinGecko
+   platform-мапа +bsc/world-chain/ink (platform-id звірено з живим `/asset_platforms`;
+   `ChainId::BSC`=56 додано), новий additive skip-reason `unsupported_chain` — відсутню ціну
+   класифіковано за покриттям чейна (поза покриттям → `unsupported_chain`, покритий чейн без
+   ціни токена → `price_unknown`) — **зроблено** (COV-1..3). Не чіпали не-EVM / native-gas.
+8. ✅ **GAS — real gas by default + source transparency** (вузький, correctness+legibility):
+   газова **драбина** etherscan `gasoracle` → `eth_feeHistory` → static (`LadderGasModel`);
+   `live` бере її **за замовчуванням** (`--static-gas` форсить static), `backtest` — static-дефолт
+   з опт-ін `--live-gas`, `--reproducible` → static. Кожен `GasEstimate` несе `origin` → нове
+   additive поле `gas_source` (`etherscan`/`feehistory`/`static`) у `Quote` і `DecisionRecord`.
+   Etherscan V2 `gasoracle`: `status!="1"`/нема ключа/помилка → `None`, драбина падає далі (нуль
+   вигаданих цін; звірено наживо 2026-06-24 — eth/polygon/arbitrum покриті, optimism/base ні).
+   Polygon-газ у POL (не ETH). Юніти (≈300k) не чіпали (правило #2). `doctor` показує драбину
+   per-chain — **зроблено** (GAS-1..5).
+9. ✅ **HOV — margin transparency** (дашборд-розширення поверх GAS): на комірці profit —
+   hover-тултип `Gross − Gas = Net` (gross = `expected_profit_usd + gas_usd`, газ із джерелом);
+   `gas_source == "static"` позначено `⚠ static` (жовтий) + підказка «set ACROSS_RPC_<chain>»,
+   щоб stale-газ було видно. HOV-1 уже зроблено в GAS-1; ідентичність `gross = net + gas`
+   застраховано Rust-тестом (JS-харнеса нема), JS звірено `node --check` — **зроблено** (HOV-1..3).
+10. ✅ **BETA-1 — ядро бети (публічно + надійно + чесно)**: `BNET-1` (`deploy/Caddyfile` +
+    `GET /healthz` — публічний HTTPS-front на loopback:8088), `BAGG-1` (`cli/src/aggregates.rs`
+    — 24h/7d агрегати перераховуються з `decisions-*.jsonl` при старті й на кожен heartbeat,
+    `GET /aggregates`, дашборд полить із перемикачем 24h/7d — рестарт не втрачає історію,
+    звірено наживо), `BRESIL-1` (`deploy/solver-live.service` — unbounded, restart-on-failure,
+    hardened), `BFRAME-1` (`GET /about` + `gas_source` завжди видимий інлайн-тег, не лише
+    hover), `BDEPLOY-1` (`deploy/update.sh` + `just deploy-remote`; виправлено нестиковку
+    nested-sudo в чернетці й дрейф назви репо `solver-engine`→`solver-oif`) — **зроблено**.
+    Реальний прогін на VPS (Hetzner) — за людиною, не агентом.
+11. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

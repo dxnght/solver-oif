@@ -38,8 +38,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap              = { version = "4", features = ["derive"] }
 async-trait       = "0.1"
 futures           = "0.3"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 hex               = "0.4"
 alloy-primitives       = { version = "0.8", features = ["serde"] }
+alloy-sol-types        = { version = "0.8" }
 
 [profile.dev]
 opt-level = 0

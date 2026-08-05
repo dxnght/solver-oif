@@ -49,6 +49,33 @@ impl Route {
     }
 }
 
+/// Which gas model actually produced an estimate. Surfaced per-quote so a
+/// reader can tell a live oracle reading from a static fallback (CLAUDE.md #7
+/// — legibility). The wire strings (`etherscan`/`feehistory`/`static`) are
+/// durable: the live shadow log carries one into every `DecisionRecord`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GasOrigin {
+    /// Etherscan V2 `gastracker/gasoracle` live gas price.
+    Etherscan,
+    /// `eth_feeHistory` live gas price over an RPC.
+    FeeHistory,
+    /// Static per-chain hard-coded estimate — no live price was available.
+    Static,
+}
+
+impl GasOrigin {
+    /// Stable wire string (matches the `serde` lowercase rename), for the JSONL
+    /// `gas_source` field and log lines.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GasOrigin::Etherscan => "etherscan",
+            GasOrigin::FeeHistory => "feehistory",
+            GasOrigin::Static => "static",
+        }
+    }
+}
+
 /// Output of the Quoter/Router. The Bid-decision stage filters on this
 /// via [`crate::FillPolicy`] — fills happen only when
 /// `expected_profit_usd > min_margin_usd` with sufficient `confidence`.
@@ -78,6 +105,9 @@ pub struct Quote {
     /// loop log it (RES-3) and lets the backtest report a net-of-gas
     /// realized margin alongside the price-only one.
     pub gas_usd: f64,
+    /// Which model produced `gas_usd` / `cost_gas` — `etherscan`, `feehistory`
+    /// or `static`. Lets a reader tell a live gas reading from a fallback.
+    pub gas_source: GasOrigin,
     /// `[0, 1]` — how confident we are in `expected_profit` (price stability,
     /// latency assumptions, slippage model fit).
     pub confidence: f64,
