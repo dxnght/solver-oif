@@ -1,7 +1,9 @@
 # Deploy — public intent-flow dashboard (beta)
 
 Bring the live shadow + dashboard up as a public, TLS-terminated site on a
-single VPS (tested target: Hetzner). Three layers:
+single VPS. **Tested live 2026-08-05 on Zomro (1 vCPU / 2.5GB RAM / 15GB disk,
+Ubuntu 24.04)** — the smallest end of what this needs; Hetzner or any similar
+Debian/Ubuntu box works the same way, with more headroom. Three layers:
 
 - **BRESIL-1** — `solver-live.service`: the live loop + dashboard, 24/7, restart-on-crash.
 - **BNET-1** — `Caddyfile`: the only public listener; auto-HTTPS → loopback:8088.
@@ -30,6 +32,13 @@ sudo chown -R solver:solver /opt/solver/reports /opt/solver/data
 
 # --- Rust toolchain, as YOUR admin account (build on the box) ---
 curl https://sh.rustup.rs -sSf | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup component add clippy   # update.sh runs the full /verify gate, needs this
+
+# --- system C toolchain (rustup does NOT bring this) ---
+# minimal Ubuntu images don't ship a linker; without it every build fails on
+# `error: linker `cc` not found` at the first proc-macro crate.
+sudo apt install -y build-essential pkg-config
 
 # --- Caddy (Debian/Ubuntu) ---
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
@@ -57,8 +66,16 @@ sudo chown solver:solver /opt/solver/solver.env
 sudo chmod 600 /opt/solver/solver.env
 
 # first build + binary
-cd ~/solver-oif && cargo build --workspace --release
+cd ~/solver-oif
+# on a small box (1-2 vCPU), cap parallelism — the release profile is
+# `codegen-units=1` + `lto=thin` (deliberately, for binary quality), which is
+# memory-hungry; a few concurrent rustc/LLVM processes can OOM a 2-3GB VPS.
+# Add swap too if RAM is under ~4GB (`fallocate -l 2G /swapfile && ...`).
+export CARGO_BUILD_JOBS=1
+cargo build --workspace --release
 sudo install -m 0755 target/release/solver /opt/solver/bin/solver
+rm -rf target   # debug+release build artifacts (a few GB) — only the
+                # installed binary needs to persist, disk is often tight
 ```
 
 ## 3. Service + proxy
@@ -76,12 +93,27 @@ curl -s localhost:8088/healthz         # → ok
 # Caddy: put your domain in the Caddyfile, then install + reload
 sudo sed -i 's/intents.example.com/YOUR.DOMAIN/' ~/solver-oif/deploy/Caddyfile
 sudo cp ~/solver-oif/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
 
 Point `YOUR.DOMAIN`'s A/AAAA record at the VPS IP first — Caddy provisions the
 Let's Encrypt cert automatically on first request. Then open
 `https://YOUR.DOMAIN` — live feed should stream within a minute of flow.
+
+No domain yet? [sslip.io](https://sslip.io) resolves any `<name>.<ip-with
+-dashes>.sslip.io` to that IP with zero registration — e.g. for
+`45.131.182.254` use `solver.45-131-182-254.sslip.io` as `YOUR.DOMAIN` above.
+Caddy gets a real Let's Encrypt cert for it exactly the same way. Good enough
+for beta; swap in a real domain later with the same one-line `sed`.
+
+If `reload` fails with `permission denied` on a log path — the `log { output
+file ... }` block needs the `caddy` system user to own that directory
+specifically (a `mkdir` done as root before installing the package can leave
+it root-owned, and Caddy's graceful-reload-on-error means the OLD config
+silently keeps running, so the failure is easy to miss). Simplest fix, and
+what `deploy/Caddyfile` does now: `output stdout`, read via `journalctl -u
+caddy` — no extra directory, no permission surface.
 
 ## 4. Updates (BDEPLOY-1)
 
@@ -105,6 +137,10 @@ which just SSHes in and runs the same script (see the justfile).
 
 ## Known beta limits (honest)
 
+- **`update.sh` doesn't yet install `build-essential`/`clippy`.** First-time
+  server setup (§1 above) needs both; a redeploy on an already-provisioned
+  box doesn't. Small gap, not yet closed — do §1 once by hand before the
+  first `update.sh`/`just deploy-remote` run.
 - **Aggregates recompute wholesale from disk (BAGG-1 done, not incremental).**
   `/aggregates` is recomputed from every `decisions-*.jsonl` under `--out` once
   at startup and every heartbeat (60s) — correct and restart-safe, but a full

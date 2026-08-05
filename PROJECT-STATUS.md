@@ -113,7 +113,11 @@ static-ціни (та ще й тавтологічної: модель і realiz
     hardened), `BFRAME-1` (`GET /about` + `gas_source` завжди видимий інлайн-тег, не лише
     hover), `BDEPLOY-1` (`deploy/update.sh` + `just deploy-remote`; виправлено нестиковку
     nested-sudo в чернетці й дрейф назви репо `solver-engine`→`solver-oif`) — **зроблено**.
-    Реальний прогін на VPS (Hetzner) — за людиною, не агентом.
+    **Реальний прогін виконано 2026-08-05** на VPS Zomro (1 vCPU/2.5GB/15GB, Ubuntu 24.04):
+    `https://solver.45-131-182-254.sslip.io/` — `/healthz`/`/about`/`/aggregates` звірено
+    ззовні, живий Across-потік дав перший реальний `reason=fill` (не лише в бектесті).
+    Прогін виявив і виправив реальний баг деплою (Caddy `output file` → `permission denied`
+    на reload, тепер `output stdout`) — деталі в `ROADMAP.md` BDEPLOY-1.
 11. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
 
 ## Чого НЕ робити (застереження)
