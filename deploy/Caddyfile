@@ -36,8 +36,14 @@ intents.example.com {
 		X-Content-Type-Options "nosniff"
 	}
 
+	# stdout, not a custom file: the official Caddy package's systemd unit
+	# doesn't reliably let the `caddy` user write outside its own managed
+	# paths, so `output file /var/log/caddy/...` silently kept `reload`
+	# failing (graceful-reload-on-error left the OLD config running, so the
+	# real site block never activated). journald already captures stdout —
+	# `journalctl -u caddy` — same structured JSON, no extra permission surface.
 	log {
-		output file /var/log/caddy/intents.log
+		output stdout
 		format json
 	}
 }
