@@ -174,12 +174,16 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
         //    out-of-coverage → unsupported_chain, covered → price_unknown.
         let in_tok = intent.input.token;
         let out_tok = intent.output_min.token;
-        let (price_in, price_out) =
-            match (self.prices.usd_price(in_tok), self.prices.usd_price(out_tok)) {
-                (Some(a), Some(b)) => (a, b),
-                (None, _) => return QuoteOutcome::Skipped(SkipReason::for_missing_price(in_tok.chain)),
-                (_, None) => return QuoteOutcome::Skipped(SkipReason::for_missing_price(out_tok.chain)),
-            };
+        let (price_in, price_out) = match (
+            self.prices.usd_price(in_tok),
+            self.prices.usd_price(out_tok),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            (None, _) => return QuoteOutcome::Skipped(SkipReason::for_missing_price(in_tok.chain)),
+            (_, None) => {
+                return QuoteOutcome::Skipped(SkipReason::for_missing_price(out_tok.chain))
+            }
+        };
         let native = TokenRef::new(intent.dest_chain, Address::ZERO);
         let native_price = match self.prices.usd_price(native) {
             Some(p) => p,
@@ -246,13 +250,18 @@ impl<P: PriceFeed, G: GasModel> RouterV0<P, G> {
         let route = Route {
             hops: vec![RouteHop {
                 chain: intent.dest_chain,
-                source: if same_class { RouteSource::Inventory } else { RouteSource::Aggregator },
-                input: intent.output_min,  // what we spend to source the delivery
+                source: if same_class {
+                    RouteSource::Inventory
+                } else {
+                    RouteSource::Aggregator
+                },
+                input: intent.output_min, // what we spend to source the delivery
                 output: intent.output_min, // what we hand the user
                 gas_native,
             }],
         };
-        let expected_profit = signed_amount_from_usd(out_tok, out_dec, expected_profit_usd, price_out);
+        let expected_profit =
+            signed_amount_from_usd(out_tok, out_dec, expected_profit_usd, price_out);
 
         QuoteOutcome::Quoted(Box::new(Quote {
             intent_id: intent.id.clone(),
@@ -342,7 +351,11 @@ fn value_class(token: TokenRef) -> AssetClass {
 /// `price_out` is assumed > 0 (the caller only reaches here with a known,
 /// positive price). NaN/∞ collapse to zero.
 fn signed_amount_from_usd(token: TokenRef, decimals: u8, usd: f64, price_out: f64) -> SignedAmount {
-    let whole = if price_out > 0.0 { usd.abs() / price_out } else { 0.0 };
+    let whole = if price_out > 0.0 {
+        usd.abs() / price_out
+    } else {
+        0.0
+    };
     let base = whole * 10f64.powi(decimals as i32);
     let magnitude = if base.is_finite() && base >= 0.0 {
         U256::from(base as u128)
@@ -390,9 +403,7 @@ mod tests {
     use alloy_primitives::address;
     use chrono::Duration;
     use solver_pricing::StaticGasModel;
-    use solver_types::{
-        FillPolicy, GasOrigin, IntentId, SettlementType, Source,
-    };
+    use solver_types::{FillPolicy, GasOrigin, IntentId, SettlementType, Source};
 
     const BASE_USDC: Address = address!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
     const ARB_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
@@ -443,11 +454,24 @@ mod tests {
     /// 1000 − 998 − gas, not against itself.
     #[tokio::test]
     async fn profitable_stable_route_quotes_and_fills() {
-        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::ARBITRUM,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            998_000_000,
+            6,
+        );
         let out = router().quote(&i, i.observed_at).await;
         let q = out.quote().expect("should quote");
         // gas on Arbitrum is ~0.00003 ETH * $3000 ≈ $0.09, so profit ≈ $1.91.
-        assert!((q.expected_profit_usd - 2.0).abs() < 0.2, "profit {}", q.expected_profit_usd);
+        assert!(
+            (q.expected_profit_usd - 2.0).abs() < 0.2,
+            "profit {}",
+            q.expected_profit_usd
+        );
         assert!(q.expected_profit_usd > 1.5);
         assert_eq!(q.confidence, CONF_SAME_CLASS);
         assert!(FillPolicy::default().is_fill(q));
@@ -463,8 +487,22 @@ mod tests {
     async fn polygon_gas_priced_in_pol_not_eth() {
         // USDC (stable, $1) in on Base → USDC out on Polygon, so both sides
         // price and the quote turns on the dest-chain native gas valuation.
-        let i = intent(ChainId::BASE, ChainId::POLYGON, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("should quote");
+        let i = intent(
+            ChainId::BASE,
+            ChainId::POLYGON,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            998_000_000,
+            6,
+        );
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("should quote");
 
         let native = TokenRef::new(ChainId::POLYGON, Address::ZERO);
         let gas_native = StaticGasModel.fill_gas(ChainId::POLYGON).await.native_wei;
@@ -472,7 +510,11 @@ mod tests {
         let expected_pol = gas_matic * 0.50; // priced in POL
         let wrong_eth = gas_matic * 3000.0; // the bug we guard against
 
-        assert!((q.gas_usd - expected_pol).abs() < 1e-9, "gas {} ≠ POL-priced {expected_pol}", q.gas_usd);
+        assert!(
+            (q.gas_usd - expected_pol).abs() < 1e-9,
+            "gas {} ≠ POL-priced {expected_pol}",
+            q.gas_usd
+        );
         assert!(
             (q.gas_usd - wrong_eth).abs() > 1.0,
             "gas {} is ETH-priced — Polygon native must be POL",
@@ -490,8 +532,22 @@ mod tests {
     /// router ever stopped subtracting gas to get net, the tooltip would lie.
     #[tokio::test]
     async fn profit_gross_equals_net_plus_gas() {
-        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("should quote");
+        let i = intent(
+            ChainId::BASE,
+            ChainId::ARBITRUM,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            998_000_000,
+            6,
+        );
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("should quote");
         let gross = 1_000.0 - 998.0; // hand-computed, independent of the quote
         assert!(q.gas_usd > 0.0, "a real fill costs gas");
         assert!(
@@ -507,9 +563,27 @@ mod tests {
     /// route's economics is its job); the FillPolicy owns the fill decision.
     #[tokio::test]
     async fn underwater_route_quotes_but_policy_declines() {
-        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 1_001_000_000, 6);
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
-        assert!(q.expected_profit_usd < 0.0, "profit {}", q.expected_profit_usd);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::ARBITRUM,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            1_001_000_000,
+            6,
+        );
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("quotes");
+        assert!(
+            q.expected_profit_usd < 0.0,
+            "profit {}",
+            q.expected_profit_usd
+        );
         assert!(!FillPolicy::default().is_fill(&q));
     }
 
@@ -522,12 +596,33 @@ mod tests {
         // 1 WETH in (~$3000) vs only 1500 USDC out → a fat *phantom* $1500
         // modeled profit. The policy must still decline it (Suspect), because
         // confidence is below threshold.
-        let i = intent(ChainId::BASE, ChainId::BASE, BASE_WETH, 1_000_000_000_000_000_000, 18, BASE_USDC, 1_500_000_000, 6);
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
+        let i = intent(
+            ChainId::BASE,
+            ChainId::BASE,
+            BASE_WETH,
+            1_000_000_000_000_000_000,
+            18,
+            BASE_USDC,
+            1_500_000_000,
+            6,
+        );
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("quotes");
         assert_eq!(q.confidence, CONF_CROSS_CLASS);
         assert!(q.confidence < CONF_SAME_CLASS);
-        assert!(q.expected_profit_usd > 1000.0, "phantom profit is large: {}", q.expected_profit_usd);
-        assert!(!FillPolicy::default().is_fill(&q), "static cross-class must not fill");
+        assert!(
+            q.expected_profit_usd > 1000.0,
+            "phantom profit is large: {}",
+            q.expected_profit_usd
+        );
+        assert!(
+            !FillPolicy::default().is_fill(&q),
+            "static cross-class must not fill"
+        );
         assert!(q.confidence < FillPolicy::default().min_confidence);
     }
 
@@ -543,18 +638,51 @@ mod tests {
     async fn implausible_same_class_margin_is_demoted_to_suspect() {
         // 1 WETH in (~$3000); output WETH amount is 1 wei → sourcing ≈ 0 →
         // profit ≈ $3000 on $3000 revenue (≈100% margin). Same-class WETH→WETH.
-        let i = intent(ChainId::BASE, ChainId::BASE, BASE_WETH, 1_000_000_000_000_000_000, 18, BASE_WETH, 1, 18);
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
-        assert!(q.expected_profit_usd > 1000.0, "artifact profit is large: {}", q.expected_profit_usd);
-        assert_eq!(q.confidence, CONF_IMPLAUSIBLE, "implausible same-class margin must be demoted");
-        assert!(!FillPolicy::default().is_fill(&q), "an impossible margin must not count as would_fill");
+        let i = intent(
+            ChainId::BASE,
+            ChainId::BASE,
+            BASE_WETH,
+            1_000_000_000_000_000_000,
+            18,
+            BASE_WETH,
+            1,
+            18,
+        );
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("quotes");
+        assert!(
+            q.expected_profit_usd > 1000.0,
+            "artifact profit is large: {}",
+            q.expected_profit_usd
+        );
+        assert_eq!(
+            q.confidence, CONF_IMPLAUSIBLE,
+            "implausible same-class margin must be demoted"
+        );
+        assert!(
+            !FillPolicy::default().is_fill(&q),
+            "an impossible margin must not count as would_fill"
+        );
     }
 
     /// An unrecognised output token has no offline USD price → skip rather
     /// than fabricate a valuation.
     #[tokio::test]
     async fn unknown_token_is_skipped_not_priced() {
-        let i = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, Address::repeat_byte(0x42), 1_000_000_000_000_000_000, 18);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::BASE,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            Address::repeat_byte(0x42),
+            1_000_000_000_000_000_000,
+            18,
+        );
         match router().quote(&i, i.observed_at).await {
             QuoteOutcome::Skipped(SkipReason::PriceUnknown) => {}
             other => panic!("expected PriceUnknown skip, got {other:?}"),
@@ -576,7 +704,16 @@ mod tests {
     async fn live_price_without_known_decimals_still_skips() {
         use crate::{LivePriceFeed, PriceResolver, PriceSource};
         let mystery = Address::repeat_byte(0x42);
-        let i = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::BASE,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            mystery,
+            1_000_000_000_000_000_000,
+            18,
+        );
 
         // Static feed: unknown output token → price_unknown (no price at all).
         assert!(matches!(
@@ -595,7 +732,10 @@ mod tests {
             }
         });
         let live = RouterV0::new(
-            PriceSource::Live(LivePriceFeed::with_resolver(StaticPriceFeed::reference(), resolver)),
+            PriceSource::Live(LivePriceFeed::with_resolver(
+                StaticPriceFeed::reference(),
+                resolver,
+            )),
             StaticGasModel,
         );
         assert!(
@@ -619,26 +759,59 @@ mod tests {
         let mystery = Address::repeat_byte(0x42);
 
         // Covered dest chain, unknown output token → price_unknown.
-        let covered = intent(ChainId::BASE, ChainId::BASE, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+        let covered = intent(
+            ChainId::BASE,
+            ChainId::BASE,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            mystery,
+            1_000_000_000_000_000_000,
+            18,
+        );
         assert!(
-            matches!(router().quote(&covered, covered.observed_at).await,
-                QuoteOutcome::Skipped(SkipReason::PriceUnknown)),
+            matches!(
+                router().quote(&covered, covered.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::PriceUnknown)
+            ),
             "unknown token on a covered chain must be price_unknown"
         );
 
         // Out-of-coverage dest chain (Scroll), unknown output token → unsupported_chain.
-        let bad_dest = intent(ChainId::BASE, ChainId::SCROLL, BASE_USDC, 1_000_000_000, 6, mystery, 1_000_000_000_000_000_000, 18);
+        let bad_dest = intent(
+            ChainId::BASE,
+            ChainId::SCROLL,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            mystery,
+            1_000_000_000_000_000_000,
+            18,
+        );
         assert!(
-            matches!(router().quote(&bad_dest, bad_dest.observed_at).await,
-                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)),
+            matches!(
+                router().quote(&bad_dest, bad_dest.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)
+            ),
             "token on an out-of-coverage dest chain must be unsupported_chain"
         );
 
         // Out-of-coverage origin chain (Scroll), unknown input token → unsupported_chain.
-        let bad_origin = intent(ChainId::SCROLL, ChainId::BASE, mystery, 1_000_000_000_000_000_000, 18, BASE_USDC, 1_000_000_000, 6);
+        let bad_origin = intent(
+            ChainId::SCROLL,
+            ChainId::BASE,
+            mystery,
+            1_000_000_000_000_000_000,
+            18,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+        );
         assert!(
-            matches!(router().quote(&bad_origin, bad_origin.observed_at).await,
-                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)),
+            matches!(
+                router().quote(&bad_origin, bad_origin.observed_at).await,
+                QuoteOutcome::Skipped(SkipReason::UnsupportedChain)
+            ),
             "token on an out-of-coverage origin chain must be unsupported_chain"
         );
     }
@@ -646,7 +819,16 @@ mod tests {
     /// Evaluating after the deadline → Expired (the live liveness gate).
     #[tokio::test]
     async fn expired_intent_is_skipped() {
-        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::ARBITRUM,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            998_000_000,
+            6,
+        );
         let after = i.deadline + Duration::seconds(1);
         match router().quote(&i, after).await {
             QuoteOutcome::Skipped(SkipReason::Expired) => {}
@@ -662,15 +844,32 @@ mod tests {
     #[tokio::test]
     async fn decide_matches_quote_then_evaluate() {
         let policy = FillPolicy::default();
-        let i = intent(ChainId::BASE, ChainId::ARBITRUM, BASE_USDC, 1_000_000_000, 6, ARB_USDC, 998_000_000, 6);
+        let i = intent(
+            ChainId::BASE,
+            ChainId::ARBITRUM,
+            BASE_USDC,
+            1_000_000_000,
+            6,
+            ARB_USDC,
+            998_000_000,
+            6,
+        );
 
         // Quoted path: helper agrees with the manual quote+evaluate.
-        let q = router().quote(&i, i.observed_at).await.quote().cloned().expect("quotes");
+        let q = router()
+            .quote(&i, i.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .expect("quotes");
         let (fill, reason) = policy.evaluate(&q);
         let d = router().decide(&i, i.observed_at, &policy).await;
         assert_eq!(d.would_fill(), fill);
         assert_eq!(d.reason(), reason.as_str());
-        assert_eq!(d.quote().unwrap().expected_profit_usd, q.expected_profit_usd);
+        assert_eq!(
+            d.quote().unwrap().expected_profit_usd,
+            q.expected_profit_usd
+        );
 
         // Skip path: reason is the SkipReason, would_fill false, no quote.
         let after = i.deadline + Duration::seconds(1);
@@ -685,16 +884,47 @@ mod tests {
     /// lower on Ethereum. Guards the gas→USD wiring behaviorally.
     #[tokio::test]
     async fn higher_gas_chain_yields_lower_profit() {
-        let on_base = intent(ChainId::ARBITRUM, ChainId::BASE, ARB_USDC, 1_000_000_000, 6, BASE_USDC, 990_000_000, 6);
+        let on_base = intent(
+            ChainId::ARBITRUM,
+            ChainId::BASE,
+            ARB_USDC,
+            1_000_000_000,
+            6,
+            BASE_USDC,
+            990_000_000,
+            6,
+        );
         let on_eth = {
             let mut i = on_base.clone();
             i.dest_chain = ChainId::ETHEREUM;
-            i.output_min = AssetAmount::new(TokenRef::new(ChainId::ETHEREUM, address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")), U256::from(990_000_000u64), 6);
+            i.output_min = AssetAmount::new(
+                TokenRef::new(
+                    ChainId::ETHEREUM,
+                    address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+                ),
+                U256::from(990_000_000u64),
+                6,
+            );
             i
         };
-        let pb = router().quote(&on_base, on_base.observed_at).await.quote().cloned().unwrap();
-        let pe = router().quote(&on_eth, on_eth.observed_at).await.quote().cloned().unwrap();
-        assert!(pb.expected_profit_usd > pe.expected_profit_usd, "base {} eth {}", pb.expected_profit_usd, pe.expected_profit_usd);
+        let pb = router()
+            .quote(&on_base, on_base.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .unwrap();
+        let pe = router()
+            .quote(&on_eth, on_eth.observed_at)
+            .await
+            .quote()
+            .cloned()
+            .unwrap();
+        assert!(
+            pb.expected_profit_usd > pe.expected_profit_usd,
+            "base {} eth {}",
+            pb.expected_profit_usd,
+            pe.expected_profit_usd
+        );
     }
 
     /// Dutch decay: midpoint of a 60s window from 3110→3009 base units is
@@ -709,10 +939,22 @@ mod tests {
             start_output: U256::from(3_110u64),
             end_output: U256::from(3_009u64),
         };
-        assert_eq!(effective_output_at(&decay, t0 - Duration::seconds(5)), U256::from(3_110u64));
+        assert_eq!(
+            effective_output_at(&decay, t0 - Duration::seconds(5)),
+            U256::from(3_110u64)
+        );
         assert_eq!(effective_output_at(&decay, t0), U256::from(3_110u64));
-        assert_eq!(effective_output_at(&decay, t0 + Duration::seconds(30)), U256::from(3_060u64));
-        assert_eq!(effective_output_at(&decay, t0 + Duration::seconds(60)), U256::from(3_009u64));
-        assert_eq!(effective_output_at(&decay, t0 + Duration::seconds(90)), U256::from(3_009u64));
+        assert_eq!(
+            effective_output_at(&decay, t0 + Duration::seconds(30)),
+            U256::from(3_060u64)
+        );
+        assert_eq!(
+            effective_output_at(&decay, t0 + Duration::seconds(60)),
+            U256::from(3_009u64)
+        );
+        assert_eq!(
+            effective_output_at(&decay, t0 + Duration::seconds(90)),
+            U256::from(3_009u64)
+        );
     }
 }
