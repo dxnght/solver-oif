@@ -29,6 +29,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
+use crate::aggregates::Aggregates;
+
 /// The browser UI, embedded at compile time (no runtime file dependency).
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
@@ -36,6 +38,11 @@ const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 /// runtime dependency, so a reviewer can understand the dashboard's limits
 /// from the deployed binary alone.
 const ABOUT_HTML: &str = include_str!("about.html");
+
+/// BPOLISH-3: the digest page shell, embedded the same way. `{{BODY}}` and
+/// `{{ASOF}}` are replaced per-request with `aggregates::render_digest_body`
+/// output — the shell is static, the numbers are not.
+const DIGEST_HTML: &str = include_str!("digest.html");
 
 /// How many recent decisions a freshly-connected client is replayed, so it
 /// never starts on an empty screen. Small: this is "recent flow", not history
@@ -56,11 +63,14 @@ const CHANNEL_CAP: usize = 1024;
 pub struct DashboardHandle {
     tx: broadcast::Sender<String>,
     replay: Arc<Mutex<VecDeque<String>>>,
-    /// BAGG-1: the last recomputed 24h/7d aggregates snapshot, pre-serialized
-    /// JSON. `None` until the live loop's first [`Self::set_aggregates`] call
-    /// (a client connecting in that brief window gets `null`, handled by the
-    /// dashboard JS as "not loaded yet" — never a crash).
-    aggregates: Arc<Mutex<Option<String>>>,
+    /// BAGG-1: the last recomputed 24h/7d aggregates snapshot. `None` until
+    /// the live loop's first [`Self::set_aggregates`] call (a client
+    /// connecting in that brief window gets `null` from `/aggregates`,
+    /// handled by the dashboard JS as "not loaded yet" — never a crash).
+    /// Kept structured (not pre-serialized) so BPOLISH-3's `/digest` can
+    /// render off the same snapshot `/aggregates` serves, without a second
+    /// JSON round-trip.
+    aggregates: Arc<Mutex<Option<Aggregates>>>,
     /// The actually-bound address (useful when `port = 0` picks an ephemeral
     /// one, e.g. in tests, and for the startup log line).
     pub addr: SocketAddr,
@@ -92,12 +102,12 @@ impl DashboardHandle {
         let _ = self.tx.send(json);
     }
 
-    /// BAGG-1: swap in a freshly recomputed aggregates snapshot, serialized by
-    /// the caller (`crate::aggregates::compute` + `serde_json::to_string`).
-    /// Replaces the whole snapshot atomically — `/aggregates` never serves a
+    /// BAGG-1: swap in a freshly recomputed aggregates snapshot (the caller
+    /// computes it via `crate::aggregates::compute`). Replaces the whole
+    /// snapshot atomically — `/aggregates` and `/digest` never serve a
     /// half-updated window.
-    pub fn set_aggregates(&self, json: String) {
-        *self.aggregates.lock().expect("aggregates poisoned") = Some(json);
+    pub fn set_aggregates(&self, agg: Aggregates) {
+        *self.aggregates.lock().expect("aggregates poisoned") = Some(agg);
     }
 }
 
@@ -146,13 +156,14 @@ async fn handle_conn(
     mut stream: TcpStream,
     tx: broadcast::Sender<String>,
     replay: Arc<Mutex<VecDeque<String>>>,
-    aggregates: Arc<Mutex<Option<String>>>,
+    aggregates: Arc<Mutex<Option<Aggregates>>>,
 ) -> std::io::Result<()> {
     let path = match read_request_path(&mut stream).await? {
         Some(p) => p,
         None => return Ok(()), // empty/closed connection
     };
-    // Strip any query string; routes are exact.
+    // Strip any query string for routing; `/digest` reads it back separately
+    // (its `?window=` param) since routes are matched exact.
     let route = path.split('?').next().unwrap_or("/");
     match route {
         "/" => serve_html(&mut stream).await,
@@ -160,6 +171,7 @@ async fn handle_conn(
         "/events" => serve_events(stream, tx, replay).await,
         "/healthz" => serve_health(&mut stream).await,
         "/aggregates" => serve_aggregates(&mut stream, &aggregates).await,
+        "/digest" => serve_digest(&mut stream, &path, &aggregates).await,
         _ => serve_404(&mut stream).await,
     }
 }
@@ -189,12 +201,13 @@ async fn serve_health(stream: &mut TcpStream) -> std::io::Result<()> {
 /// other slow first paint), never a crash.
 async fn serve_aggregates(
     stream: &mut TcpStream,
-    aggregates: &Mutex<Option<String>>,
+    aggregates: &Mutex<Option<Aggregates>>,
 ) -> std::io::Result<()> {
     let body = aggregates
         .lock()
         .expect("aggregates poisoned")
-        .clone()
+        .as_ref()
+        .and_then(|a| serde_json::to_string(a).ok())
         .unwrap_or_else(|| "null".to_string());
     let header = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -207,6 +220,58 @@ async fn serve_aggregates(
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
     stream.flush().await
+}
+
+/// BPOLISH-3: serve the digest page — `render_digest_body` fills the
+/// `{{BODY}}`/`{{ASOF}}` slots in [`DIGEST_HTML`] with the current snapshot
+/// for `?window=24h` (default) or `?window=7d`. Before the first
+/// `set_aggregates` call this reads as "no data yet", never a crash or a
+/// stale-looking blank page (rule #7).
+async fn serve_digest(
+    stream: &mut TcpStream,
+    path: &str,
+    aggregates: &Mutex<Option<Aggregates>>,
+) -> std::io::Result<()> {
+    let window = match query_param(path, "window") {
+        Some("7d") => "7d",
+        _ => "24h",
+    };
+    let snapshot = aggregates.lock().expect("aggregates poisoned").clone();
+    let (body, asof) = match &snapshot {
+        Some(agg) => (
+            crate::aggregates::render_digest_body(agg, window),
+            format!("as of {}", agg.computed_at.to_rfc3339()),
+        ),
+        None => (
+            "<p class=\"empty\">no data yet — waiting for the first heartbeat.</p>".to_string(),
+            String::new(),
+        ),
+    };
+    let html = DIGEST_HTML.replacen("{{BODY}}", &body, 1).replacen("{{ASOF}}", &asof, 1);
+
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-cache\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        html.len()
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(html.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// Pull one `key=value` pair out of a request-target's query string
+/// (`"/digest?window=7d"` → `Some("7d")` for `key = "window"`). No URL
+/// decoding — the only values this repo ever sends here are the fixed
+/// `"24h"`/`"7d"` literals from `digest.html`'s own links.
+fn query_param<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    let (_, query) = path.split_once('?')?;
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == key).then_some(v)
+    })
 }
 
 /// Parse the request-target from the HTTP request line. Returns `None` on an
@@ -420,9 +485,22 @@ mod tests {
         assert!(resp.trim_end().ends_with("ok"), "expected body 'ok', got:\n{resp}");
     }
 
+    /// A minimal but non-empty snapshot, shared by the `/aggregates` and
+    /// `/digest` round-trip tests below.
+    fn sample_aggregates() -> Aggregates {
+        let mut last_24h = crate::aggregates::WindowAgg::default();
+        last_24h.total = 1;
+        last_24h.routes.insert("base → arbitrum".to_string(), 1);
+        Aggregates {
+            computed_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            last_24h,
+            last_7d: crate::aggregates::WindowAgg::default(),
+        }
+    }
+
     /// `GET /aggregates` (BAGG-1) is `null` before the live loop ever calls
     /// `set_aggregates` — never a crash for a client that connects in that
-    /// window — and round-trips whatever JSON was last set, verbatim.
+    /// window — and round-trips whatever snapshot was last set.
     #[tokio::test]
     async fn aggregates_serves_last_snapshot_or_null() {
         let h = serve(0).await.expect("serve");
@@ -432,9 +510,30 @@ mod tests {
         assert!(before.contains("application/json"), "expected json content-type");
         assert!(before.trim_end().ends_with("null"), "no snapshot yet ⇒ null, got:\n{before}");
 
-        h.set_aggregates(r#"{"computed_at":"2026-01-01T00:00:00Z","last_24h":{"total":1}}"#.to_string());
+        h.set_aggregates(sample_aggregates());
         let after = http_get(h.addr, "/aggregates").await;
         assert!(after.contains(r#""total":1"#), "expected the snapshot we set, got:\n{after}");
+    }
+
+    /// BPOLISH-3: `/digest` reads "no data yet" before the first snapshot,
+    /// then reflects it once set, and `?window=7d` serves the 7d window
+    /// rather than always defaulting to 24h.
+    #[tokio::test]
+    async fn digest_serves_no_data_then_reflects_snapshot() {
+        let h = serve(0).await.expect("serve");
+
+        let before = http_get(h.addr, "/digest").await;
+        assert!(before.contains("200 OK"), "expected 200, got:\n{before}");
+        assert!(before.contains("text/html"), "expected html content-type");
+        assert!(before.contains("no data yet"), "expected the empty state, got:\n{before}");
+
+        h.set_aggregates(sample_aggregates());
+        let after = http_get(h.addr, "/digest").await;
+        assert!(after.contains("1</b> intents observed (24h)"), "expected 24h total, got:\n{after}");
+        assert!(after.contains("base → arbitrum"), "expected the route, got:\n{after}");
+
+        let weekly = http_get(h.addr, "/digest?window=7d").await;
+        assert!(weekly.contains("0</b> intents observed (7d)"), "expected 7d total, got:\n{weekly}");
     }
 
     /// `GET /events` is an event-stream and forwards a published

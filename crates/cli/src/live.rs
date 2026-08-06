@@ -143,9 +143,7 @@ pub async fn run(
             // loop starts, so a restart's first page load already reflects
             // history instead of resetting to zero while new decisions trickle in.
             let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
-            if let Ok(json) = serde_json::to_string(&agg) {
-                handle.set_aggregates(json);
-            }
+            handle.set_aggregates(agg);
             Some(handle)
         }
         None => None,
@@ -184,9 +182,7 @@ pub async fn run(
                 // from drifting stale for long between restarts.
                 if let Some(d) = &dashboard {
                     let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
-                    if let Ok(json) = serde_json::to_string(&agg) {
-                        d.set_aggregates(json);
-                    }
+                    d.set_aggregates(agg);
                 }
             }
             maybe = rx.recv() => match maybe {

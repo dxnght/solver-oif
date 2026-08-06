@@ -40,6 +40,18 @@ impl WindowAgg {
         *self.routes.entry(pair).or_insert(0) += 1;
         *self.dest_chains.entry(dest).or_insert(0) += 1;
     }
+
+    /// BPOLISH-3: share of this window's decisions skipped as
+    /// `exclusive_to_other` — mirrors the client-side formula in
+    /// `dashboard.html`'s `renderAggregates` (`exclusive / total * 100`)
+    /// exactly, so the digest and the dashboard hero-stat never disagree.
+    pub fn exclusivity_pct(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        let exclusive = self.reasons.get("exclusive_to_other").copied().unwrap_or(0);
+        exclusive as f64 / self.total as f64 * 100.0
+    }
 }
 
 /// Both windows the dashboard offers, plus when they were computed (lets a
@@ -127,6 +139,59 @@ pub fn compute(dir: &Path, now: DateTime<Utc>) -> Aggregates {
         }
     }
     agg
+}
+
+/// How many routes the digest lists — enough to see concentration, short
+/// enough to read in the "30 seconds" the BPOLISH-3 exit criterion asks for.
+const DIGEST_TOP_ROUTES: usize = 5;
+
+/// BPOLISH-3: render the `<section>` body of `GET /digest` for one window
+/// (`"24h"` or anything else defaults to `"24h"`; the other value is `"7d"`).
+/// A pure string-in/string-out function — same split as `compute` (data) vs
+/// `dashboard.rs` (transport) — so it's testable against hand-computed
+/// figures without a TCP connection.
+///
+/// The "exclusivity-shift" the ROADMAP asks for is the 24h window's
+/// `exclusivity_pct` against the 7d window's, not a day-over-day delta: no
+/// data source in this repo persists distinct daily buckets today (the parked
+/// BPOLISH-1 trend sparkline would; it isn't merged), so the honest thing is
+/// to compare the two windows that already exist and label them plainly
+/// rather than imply a shift the data doesn't back.
+pub fn render_digest_body(agg: &Aggregates, window: &str) -> String {
+    let (label, other_label, w, other) = if window == "7d" {
+        ("7d", "24h", &agg.last_7d, &agg.last_24h)
+    } else {
+        ("24h", "7d", &agg.last_24h, &agg.last_7d)
+    };
+
+    let would_fill_pct = if w.total > 0 { w.would_fill as f64 / w.total as f64 * 100.0 } else { 0.0 };
+    let excl = w.exclusivity_pct();
+    let excl_other = other.exclusivity_pct();
+    let delta = excl - excl_other;
+    let sign = if delta >= 0.0 { "+" } else { "" };
+
+    let mut routes: Vec<(&String, &u64)> = w.routes.iter().collect();
+    routes.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let routes_html = if routes.is_empty() {
+        "<li class=\"empty\">no flow observed in this window</li>".to_string()
+    } else {
+        routes
+            .into_iter()
+            .take(DIGEST_TOP_ROUTES)
+            .map(|(pair, count)| format!("<li><code>{pair}</code> — {count}</li>"))
+            .collect::<String>()
+    };
+
+    let total = w.total;
+    let would_fill = w.would_fill;
+    format!(
+        "<p><b>{total}</b> intents observed ({label}) &middot; <b>{would_fill}</b> would_fill \
+         (<b>{would_fill_pct:.1}%</b>)</p>\n\
+         <p>Exclusivity ({label}): <b>{excl:.1}%</b> &middot; {other_label} window: \
+         {excl_other:.1}% (<b>{sign}{delta:.1}pp</b> vs {other_label})</p>\n\
+         <h2>Top routes ({label})</h2>\n\
+         <ul>{routes_html}</ul>"
+    )
 }
 
 #[cfg(test)]
@@ -227,5 +292,65 @@ mod tests {
         assert_eq!(agg.last_24h.dest_chains.get("arbitrum").copied(), Some(2));
         assert_eq!(agg.last_24h.routes.get("base → arbitrum").copied(), Some(1));
         assert_eq!(agg.last_24h.routes.get("optimism → arbitrum").copied(), Some(1));
+    }
+
+    /// Hand-computed against a fixed window: 1 exclusive_to_other of 4 total
+    /// is 25.0%, independent of the implementation under test.
+    #[test]
+    fn exclusivity_pct_matches_hand_computed_ratio() {
+        let mut w = WindowAgg::default();
+        w.total = 4;
+        w.reasons.insert("exclusive_to_other".to_string(), 1);
+        w.reasons.insert("fill".to_string(), 3);
+        assert!((w.exclusivity_pct() - 25.0).abs() < 1e-9);
+    }
+
+    /// An empty window is 0%, not a NaN from a 0/0 division — the digest must
+    /// never render `NaN%` when nothing has been observed yet.
+    #[test]
+    fn exclusivity_pct_of_empty_window_is_zero() {
+        assert_eq!(WindowAgg::default().exclusivity_pct(), 0.0);
+    }
+
+    /// BPOLISH-3 exit criterion in miniature: the digest body for the 24h
+    /// window shows that window's own numbers (not the 7d window's), lists
+    /// routes by descending count, and reports the exclusivity delta against
+    /// the 7d window — all hand-computed here, independent of the renderer.
+    #[test]
+    fn digest_body_reports_window_own_numbers_and_top_routes() {
+        let mut last_24h = WindowAgg::default();
+        last_24h.total = 10;
+        last_24h.would_fill = 2;
+        last_24h.reasons.insert("exclusive_to_other".to_string(), 3); // 30.0%
+        last_24h.routes.insert("base → arbitrum".to_string(), 7);
+        last_24h.routes.insert("base → optimism".to_string(), 2);
+
+        let mut last_7d = WindowAgg::default();
+        last_7d.total = 100;
+        last_7d.reasons.insert("exclusive_to_other".to_string(), 10); // 10.0%
+
+        let agg = Aggregates { computed_at: Utc::now(), last_24h, last_7d };
+
+        let body = render_digest_body(&agg, "24h");
+        assert!(body.contains("10</b> intents observed (24h)"), "{body}");
+        assert!(body.contains("2</b> would_fill"), "{body}");
+        assert!(body.contains("20.0%"), "would_fill rate 2/10 — {body}");
+        assert!(body.contains("30.0%"), "24h exclusivity — {body}");
+        assert!(body.contains("10.0%"), "7d comparison exclusivity — {body}");
+        assert!(body.contains("+20.0pp"), "delta 30.0 - 10.0 — {body}");
+        // Higher-count route listed before the lower-count one.
+        let base_arb = body.find("base → arbitrum").expect("top route present");
+        let base_op = body.find("base → optimism").expect("second route present");
+        assert!(base_arb < base_op, "routes must sort by descending count");
+    }
+
+    /// A window with no flow at all renders a legible empty state, not an
+    /// empty `<ul></ul>` or a panic (rule #7 — idle must read as idle).
+    #[test]
+    fn digest_body_of_empty_window_is_legible() {
+        let agg = Aggregates::empty(Utc::now());
+        let body = render_digest_body(&agg, "24h");
+        assert!(body.contains("no flow observed in this window"), "{body}");
+        assert!(body.contains("0</b> intents observed"), "{body}");
     }
 }
