@@ -238,9 +238,28 @@ correctness. Валюація ноги **не** вгадує scale: збереж
 
 ## Беклог (заморожено до verified core)
 
-- OIF live (Open-подія): **спершу підтвердити адресу InputSettler on-chain** —
-  поточна хардкоднута адреса неверифікована (див. PROJECT-STATUS). Не довіряти, поки
-  не звірено. Адаптер тримати `Idle`, доки нема підтвердження.
+- **OIF-1 — `InputSettlerEscrow`-адреса. ✅ ЗРОБЛЕНО (2026-08-06).** Нове
+  `crates/ingest/src/oif/deployments.rs` (той самий патерн, що
+  `across/spoke_pool.rs`): `INPUT_SETTLER_ESCROW =
+  0x1CC9260E285C2C8AC8D2E7102F3978056Ec1d0a8`, звірено **трьома незалежними
+  джерелами** — (1) офіційний `openintentsframework/oif-contracts`
+  `DEPLOYMENTS.md`, (2) `eth_getCode` через публічні RPC на
+  ethereum/base/arbitrum/optimism (непорожній байткод, ідентичний між чейнами
+  крім ~1 immutable-слова — узгоджено з CREATE2-деплоєм одного контракту, не
+  чотирма різними), (3) [Sourcify](https://sourcify.dev) (незалежний
+  bytecode↔source верифікатор) — `runtimeMatch`/`creationMatch` обидва
+  `exact_match` → `InputSettlerEscrow.sol:InputSettlerEscrow`. `OIF_CHAINS`
+  містить лише ці 4 самостійно перевірені чейни; `DEPLOYMENTS.md` заявляє
+  більше (Polygon/BSC/Linea/Scroll/zkSync/Katana), але цитата доку — не
+  верифікація (правило #2), тож решта лишається `None`/PENDING, доки не
+  перевіримо самі.
+- **OIF-2 — живий адаптер (не почато).** Адреса підтверджена (OIF-1), але
+  сам адаптер (декодувати ERC-7683 `Open`/`StandardOrder`, нормалізувати в
+  `NormalizedIntent`, WS/poll-джерело за зразком `AcrossLive`) ще не
+  написаний. `oif` лишається `Idle` у `live`/`ingest` — не тому що адреса
+  неверифікована (вже ні), а тому що адаптера просто ще нема. Перший крок:
+  знайти реальний on-chain `Open`-лог і звірити topic0 (той самий рівень
+  строгості, що `funds_deposited_topic0_matches_real_log` для Across).
 - FEED (UniswapX real-time): webhook / filled-poll (open-poll емпірично мертвий).
 - PATH (крос-чейн кореляція Across): детермінований JOIN на `(originChainId, depositId)`.
 - Активація PENDING-чейнів: SpokePool/settler-адреси **лише з живих docs**, по одному,
