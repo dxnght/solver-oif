@@ -60,8 +60,11 @@ static-ціни (та ще й тавтологічної: модель і realiz
   Нова `crates/ingest/src/oif/deployments.rs` звірила адресу
   (`0x1CC9260E285C2C8AC8D2E7102F3978056Ec1d0a8`, `InputSettlerEscrow`) трьома
   незалежними джерелами (офіційний `DEPLOYMENTS.md`, `eth_getCode` на 4 чейнах,
-  Sourcify) — деталі в ROADMAP. Адреса підтверджена; живого адаптера ще нема
-  (OIF-2, не почато) — `oif` лишається `Idle` через це, не через довіру.
+  Sourcify) — деталі в ROADMAP. **OIF-2 (живий адаптер) теж закрито
+  (2026-08-06):** `solver live --sources oif` (або `across,oif` разом)
+  підписується на `Open`, чотири незалежні звірки topic0/decode на реальному
+  Base-логу — деталі в ROADMAP. `oif` лишається `Idle`, тільки коли нема
+  `OIF_WS_<CHAIN>`, той самий legibility-контракт, що Across.
 - ✅ **Across-події (історичні) на поточному поколінні** — закрито в B2: ingest читає
   `FilledRelay` (bytes32) з канонічного ABI. ✅ **live-WS-адаптер — закрито в B4**
   (`eth_subscribe` на `FundsDeposited`-депозити). Лишається: JOIN depozit↔fill
@@ -124,11 +127,12 @@ static-ціни (та ще й тавтологічної: модель і realiz
     Прогін виявив і виправив реальний баг деплою (Caddy `output file` → `permission denied`
     на reload, тепер `output stdout`) — деталі в `ROADMAP.md` BDEPLOY-1.
 11. ✅ **BETA-2 — поліш** (BPOLISH-1 запарковано як ідея, BPOLISH-2 свідомо
-    відкритий/незакритий — рішення Власника, BPOLISH-3 зроблено) і
-    **OIF-1 — адреса `InputSettlerEscrow` підтверджена on-chain** (три
-    незалежні джерела) — деталі в ROADMAP.
-12. Нова ширина (PATH-JOIN, FEED, OIF-2 живий адаптер тепер, коли адреса
-    підтверджена, нові чейни).
+    відкритий/незакритий — рішення Власника, BPOLISH-3 зроблено), **OIF-1 —
+    адреса `InputSettlerEscrow` підтверджена on-chain** (три незалежні
+    джерела), і **OIF-2 — живий `Open`-адаптер** (`solver live --sources
+    oif`, той самий `LiveSource`-транспорт, що Across; чотири незалежні
+    topic0/decode-звірки на реальному Base-логу) — деталі в ROADMAP.
+12. Нова ширина (PATH-JOIN, FEED, нові чейни, OIF historical/poll-ingest).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

@@ -253,13 +253,55 @@ correctness. Валюація ноги **не** вгадує scale: збереж
   більше (Polygon/BSC/Linea/Scroll/zkSync/Katana), але цитата доку — не
   верифікація (правило #2), тож решта лишається `None`/PENDING, доки не
   перевіримо самі.
-- **OIF-2 — живий адаптер (не почато).** Адреса підтверджена (OIF-1), але
-  сам адаптер (декодувати ERC-7683 `Open`/`StandardOrder`, нормалізувати в
-  `NormalizedIntent`, WS/poll-джерело за зразком `AcrossLive`) ще не
-  написаний. `oif` лишається `Idle` у `live`/`ingest` — не тому що адреса
-  неверифікована (вже ні), а тому що адаптера просто ще нема. Перший крок:
-  знайти реальний on-chain `Open`-лог і звірити topic0 (той самий рівень
-  строгості, що `funds_deposited_topic0_matches_real_log` для Across).
+- **OIF-2 — живий адаптер. ✅ ЗРОБЛЕНО (2026-08-06).** `crates/ingest/src/oif/`
+  тепер має `event.rs` (типи + `Open` topic0) і `live.rs` (`OifLive` — той
+  самий `LiveSource`/`ws::stream_logs`-транспорт, що `AcrossLive`, лише
+  адреса/topic0/decode інші). `solver live --sources across,oif` мерджить
+  обидва джерела в один потік (`crates/cli/src/live.rs`: `Vec<Box<dyn
+  LiveSource>>`, кожне переслане у спільний `mpsc`-канал); ім'я вихідного
+  файлу — з реально відкритих джерел (`decisions-across+oif-<day>.jsonl`).
+  `solver doctor` показує per-chain OIF WS-готовність тим самим блоком, що
+  Across (`OIF_WS_<CHAIN>` + `input_settler_escrow`-звірка).
+
+  **`Open`-topic0 — чотири незалежні звірки** (більше, ніж у Across
+  `FilledRelay`, бо `StandardOrder` вкладає два динамічні масиви): (1)
+  `sol!`-похідний `SIGNATURE_HASH` проти `cast keccak` канонічного підпису
+  вручну з `InputSettlerEscrow.sol`/`StandardOrderType.sol`/
+  `MandateOutputType.sol`; (2) той самий hash проти `topics[0]` **реального**
+  `Open`-логу з Base (tx `0x504e78d9…`, блок 47245610), знятого
+  `eth_getTransactionReceipt` з публічного RPC — не Etherscan; (3) `cast
+  abi-decode` цього ж логу тим самим tuple-типом дав осмислені реальні
+  значення ще до жодного Rust-коду: input-токен `0x833589fc…` = Base USDC,
+  output settler `0x52602D7c…` = вже верифікований `OutputSettlerSimple`
+  (OIF-1), output-токен `0x3c499c54…` = Polygon USDC; (4) Blockscout
+  незалежно задекодував той самий лог і дав ідентичну tuple-форму. Фікстура
+  (`testdata/open_base_usdc_to_polygon.json`) і всі чотири звірки — тести в
+  `oif::event`.
+
+  **Скоуп першого заходу:** `StandardOrder` дозволяє кілька input/output
+  ніг; `NormalizedIntent` моделює рівно одну з кожного боку. Замість
+  вгадувати, яка нога «рахується» в multi-leg ордері, `normalize_open`
+  нормалізує лише single-input/single-output (форма, в якій був реальний
+  захоплений ордер) і **скіпає** (голосний `WARN`, не тиха втрата даних) усе
+  інше — чесний PENDING-стан (правило #2), не здогадка. Також перевіряє
+  `order.originChainId` проти підписаного чейна (ловить помилково
+  налаштований `OIF_WS_<CHAIN>` на не той нетворк). `settlement:
+  ResourceLock` (поле в `solver_types::SettlementType` уже мало коментар
+  «OIF resource-lock» — співпало без змін). `exclusivity: None` — на відміну
+  від Across немає верифікованого exclusive-relayer-поля в `StandardOrder`
+  (можливо кодується в `MandateOutput.context`, але ця семантика не
+  перевірена, тож чесно `None`, не здогадка).
+
+  Перевірено: 9 нових тестів у `crates/ingest/src/oif/` (topic0 × 2 звірки,
+  повний decode реального логу з ручно звіреними полями, `normalize_open` на
+  тому самому реальному ордері з усіма полями `NormalizedIntent`, mismatch-
+  guard) + `doctor`-тести (symmetric Across/OIF WS-readiness) +
+  живий ручний прогін `solver live --sources across,oif --chains base` з
+  фіктивними `*_WS_BASE` (обидва джерела коректно `open`, обидва намагаються
+  конектитись, обидва бекоф'зять незалежно; окремо перевірено `--sources
+  oif` самостійно, `--sources bogus` (гучний WARN), і дефолт без `--sources`
+  (лишається тільки across, як і було)) — увесь workspace `/verify` зелений,
+  139 тестів.
 - FEED (UniswapX real-time): webhook / filled-poll (open-poll емпірично мертвий).
 - PATH (крос-чейн кореляція Across): детермінований JOIN на `(originChainId, depositId)`.
 - Активація PENDING-чейнів: SpokePool/settler-адреси **лише з живих docs**, по одному,

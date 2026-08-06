@@ -10,18 +10,19 @@
 //! of quiet failure rule #7 forbids.
 //!
 //! Honest scope: historical **UniswapX** (HTTP, no key), historical **Across**
-//! (`FilledRelay` via Etherscan V2, key-gated), and live **Across** (WS deposit
-//! subscription, B4) are wired. Doctor now reports both historical (V2) and
-//! live (WS) per-chain readiness: a live chain is ready when its
-//! `ACROSS_WS_<CHAIN>` is set **and** we hold a verified SpokePool for it.
-//! **OIF stays idle**: its settler address is UNVERIFIED and must be confirmed
-//! on-chain before we trust or probe it.
+//! (`FilledRelay` via Etherscan V2, key-gated), live **Across** (WS deposit
+//! subscription, B4), and live **OIF** (WS `Open` subscription, OIF-2) are
+//! wired. Doctor reports historical (V2) and both sources' live (WS) per-chain
+//! readiness: a live chain is ready when its `<SOURCE>_WS_<CHAIN>` is set
+//! **and** we hold a verified settlement address for it (Across: SpokePool;
+//! OIF: `InputSettlerEscrow`, OIF-1).
 
 use std::fmt::Write as _;
 use std::future::Future;
 
 use solver_ingest::across::spoke_pool;
-use solver_ingest::{ACROSS_CHAINS, UNISWAPX_CHAINS};
+use solver_ingest::oif::input_settler_escrow;
+use solver_ingest::{ACROSS_CHAINS, OIF_CHAINS, UNISWAPX_CHAINS};
 use solver_types::ChainId;
 
 /// Chains the live Across adapter (B4) subscribes to when their
@@ -115,6 +116,9 @@ pub struct DoctorReport {
     pub uniswapx_chains: Vec<ChainId>,
     /// (chain, `ACROSS_WS_<CHAIN>` present) — the live deposit subscription.
     pub across_ws_env: Vec<(ChainId, bool)>,
+    /// (chain, `OIF_WS_<CHAIN>` present) — the live `Open` subscription
+    /// (OIF-2). Only covers [`OIF_CHAINS`] (the OIF-1-verified addresses).
+    pub oif_ws_env: Vec<(ChainId, bool)>,
     /// (chain, `ACROSS_RPC_<CHAIN>` present) — the live-gas `eth_feeHistory`
     /// endpoint. A chain without one still works (static gas fallback); this
     /// just reports whether the LIVE gas number is available there.
@@ -152,6 +156,18 @@ impl DoctorReport {
         (ready, self.across_ws_env.len())
     }
 
+    /// How many OIF chains are WS-ready (`OIF_WS_<CHAIN>` set **and** a
+    /// verified `InputSettlerEscrow`), out of [`OIF_CHAINS`]. Same static
+    /// (no-network) shape as [`Self::across_ws_ratio`].
+    pub fn oif_ws_ratio(&self) -> (usize, usize) {
+        let ready = self
+            .oif_ws_env
+            .iter()
+            .filter(|(c, present)| *present && input_settler_escrow(*c).is_some())
+            .count();
+        (ready, self.oif_ws_env.len())
+    }
+
     /// How many live chains have an `ACROSS_RPC_<CHAIN>` set for live gas, out
     /// of the configured live set. Static env check (no network).
     pub fn across_rpc_ratio(&self) -> (usize, usize) {
@@ -167,6 +183,10 @@ pub fn gather(env: &Env) -> DoctorReport {
         .iter()
         .map(|c| (*c, env.present(&format!("ACROSS_WS_{}", c.name().to_uppercase()))))
         .collect();
+    let oif_ws_env = OIF_CHAINS
+        .iter()
+        .map(|c| (*c, env.present(&format!("OIF_WS_{}", c.name().to_uppercase()))))
+        .collect();
     let across_rpc_env = ACROSS_LIVE_CHAINS
         .iter()
         .map(|c| (*c, env.present(&format!("ACROSS_RPC_{}", c.name().to_uppercase()))))
@@ -175,6 +195,7 @@ pub fn gather(env: &Env) -> DoctorReport {
         etherscan_key_present: env.present("ETHERSCAN_API_KEY"),
         uniswapx_chains: UNISWAPX_CHAINS.to_vec(),
         across_ws_env,
+        oif_ws_env,
         across_rpc_env,
         across_probe: None,
         coingecko: None,
@@ -317,10 +338,18 @@ pub fn render(r: &DoctorReport) -> String {
         "across (live)       live        {:<19}  {}",
         across_ws_summary, ws_status,
     );
-    let _ = writeln!(
-        s,
-        "oif                 live        n/a                  IDLE (address UNVERIFIED)\n"
-    );
+    let oif_ws_summary = {
+        let set: Vec<&str> =
+            r.oif_ws_env.iter().filter(|(_, present)| *present).map(|(c, _)| c.name()).collect();
+        if set.is_empty() { "no OIF_WS_*".to_string() } else { set.join(",") }
+    };
+    let (oif_ws_ready, oif_ws_total) = r.oif_ws_ratio();
+    let oif_ws_status = if oif_ws_ready > 0 {
+        format!("READY on {oif_ws_ready}/{oif_ws_total} chains (WS)")
+    } else {
+        "IDLE (no OIF_WS_*)".to_string()
+    };
+    let _ = writeln!(s, "oif (live)          live        {:<19}  {}\n", oif_ws_summary, oif_ws_status,);
 
     // Per-chain Across V2 readiness — the real probe (or NEEDS-KEY).
     if let Some(probe) = &r.across_probe {
@@ -360,6 +389,24 @@ pub fn render(r: &DoctorReport) -> String {
         }
         let (n, m) = r.across_ws_ratio();
         let _ = writeln!(s, "  → Live Across will subscribe on {n}/{m} configured chains.");
+        let _ = writeln!(s);
+    }
+
+    // Per-chain live OIF WS readiness (OIF-2): OIF_WS_<CHAIN> presence +
+    // verified InputSettlerEscrow (OIF-1) — same shape as the Across block.
+    if !r.oif_ws_env.is_empty() {
+        let _ = writeln!(s, "OIF live — per-chain WS readiness (OIF_WS_<CHAIN>):");
+        for (c, present) in &r.oif_ws_env {
+            let _ = writeln!(
+                s,
+                "  {:<10}  {:<10}  settler {}",
+                c.name(),
+                if *present { "WS-SET" } else { "WS-MISSING" },
+                if input_settler_escrow(*c).is_some() { "✓" } else { "✗ PENDING" },
+            );
+        }
+        let (n, m) = r.oif_ws_ratio();
+        let _ = writeln!(s, "  → Live OIF will subscribe on {n}/{m} configured chains.");
         let _ = writeln!(s);
     }
 
@@ -408,10 +455,11 @@ pub fn render(r: &DoctorReport) -> String {
         _ => "across=needs-key".to_string(),
     };
     let (ws_n, ws_m) = r.across_ws_ratio();
+    let (oif_ws_n, oif_ws_m) = r.oif_ws_ratio();
     let _ = writeln!(
         s,
         "Historical: uniswapx ready on {} chains (no key), {across_line}. \
-         Live: across-ws={ws_n}/{ws_m} set, oif=idle(unverified).",
+         Live: across-ws={ws_n}/{ws_m} set, oif-ws={oif_ws_n}/{oif_ws_m} set.",
         r.uniswapx_chains.len()
     );
     let (rpc_n, rpc_m) = r.across_rpc_ratio();
@@ -495,6 +543,7 @@ mod tests {
             etherscan_key_present: true,
             uniswapx_chains: UNISWAPX_CHAINS.to_vec(),
             across_ws_env: vec![],
+            oif_ws_env: vec![],
             across_rpc_env: vec![],
             across_probe: Some(probes),
             coingecko: None,
@@ -522,8 +571,9 @@ mod tests {
     }
 
     /// The default (empty env, no probe) render is loud-positive about the
-    /// no-key path, keeps OIF explicitly UNVERIFIED, reports Across as
-    /// needs-key, and prints the suggest command. Legibility guarantees (#7).
+    /// no-key path, reports both Across and OIF live as idle (nothing
+    /// configured), reports Across historical as needs-key, and prints the
+    /// suggest command. Legibility guarantees (#7).
     #[test]
     fn render_is_legible_and_honest() {
         let lookup = env_from(HashMap::new());
@@ -531,13 +581,14 @@ mod tests {
         let out = render(&r);
         assert!(out.contains("NO API key"));
         assert!(out.contains("DATA-OK on"));
-        assert!(out.contains("oif"));
-        assert!(out.contains("UNVERIFIED"));
         assert!(out.contains("across=needs-key"));
-        // Empty env → live Across is idle, every live chain WS-MISSING.
+        // Empty env → live Across and live OIF are both idle, every live
+        // chain WS-MISSING on both.
         assert!(out.contains("IDLE (no ACROSS_WS_*)"));
+        assert!(out.contains("IDLE (no OIF_WS_*)"));
         assert!(out.contains("WS-MISSING"));
         assert!(out.contains("across-ws=0/3 set"));
+        assert!(out.contains("oif-ws=0/4 set"));
         assert!(out.contains(SUGGEST_NO_KEY));
     }
 
@@ -558,6 +609,23 @@ mod tests {
         assert!(out.contains("across-ws=1/3 set"));
     }
 
+    /// OIF-2: same shape as `render_shows_live_ws_readiness`, but for OIF —
+    /// with one `OIF_WS_<CHAIN>` set, doctor reports per-chain readiness
+    /// against the OIF-1-verified `InputSettlerEscrow` chains, not the
+    /// Across-specific set (`OIF_CHAINS` includes Ethereum, which
+    /// `ACROSS_LIVE_CHAINS` deliberately does not).
+    #[test]
+    fn render_shows_oif_live_ws_readiness() {
+        let lookup = env_from(HashMap::from([("OIF_WS_BASE", "wss://x")]));
+        let r = gather(&Env { lookup: &lookup });
+        assert_eq!(r.oif_ws_ratio(), (1, OIF_CHAINS.len()));
+        let out = render(&r);
+        assert!(out.contains("OIF live — per-chain WS readiness"));
+        assert!(out.contains(&format!("READY on 1/{} chains (WS)", OIF_CHAINS.len())));
+        assert!(out.contains(&format!("Live OIF will subscribe on 1/{} configured chains.", OIF_CHAINS.len())));
+        assert!(out.contains(&format!("oif-ws=1/{} set", OIF_CHAINS.len())));
+    }
+
     /// If no source would produce data, the top line is a loud ✗.
     #[test]
     fn render_is_loud_when_no_data() {
@@ -565,6 +633,7 @@ mod tests {
             etherscan_key_present: false,
             uniswapx_chains: vec![],
             across_ws_env: vec![],
+            oif_ws_env: vec![],
             across_rpc_env: vec![],
             across_probe: None,
             coingecko: None,

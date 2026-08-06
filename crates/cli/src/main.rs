@@ -65,12 +65,15 @@ enum Command {
         reproducible: bool,
     },
     /// Phase-1 live shadow: subscribe to real-time intents and log shadow
-    /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` per chain.
+    /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` and/or
+    /// `OIF_WS_<CHAIN>` per chain, depending on `--sources`.
     Live {
         /// Comma-separated origin chains, e.g. `base,arbitrum,optimism`.
         #[arg(long)]
         chains: String,
-        /// Comma-separated sources. Only `across` is wired; `oif` stays idle.
+        /// Comma-separated sources: `across` (needs `ACROSS_WS_<CHAIN>`) and/or
+        /// `oif` (needs `OIF_WS_<CHAIN>`, OIF-2). A source with nothing
+        /// configured is idle, not an error.
         #[arg(long, default_value = "across")]
         sources: String,
         /// Stop after N seconds (omit to run until interrupted).
@@ -237,8 +240,10 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
             Ok(())
         }
         "oif" => anyhow::bail!(
-            "source 'oif': IDLE — settler address UNVERIFIED, must be confirmed on-chain \
-             first (see PROJECT-STATUS). Not ingesting."
+            "source 'oif': no historical ingest yet — 'ingest' scans backfill data, and OIF-2 \
+             only built the WS live adapter (`solver live --sources oif`), not a getLogs \
+             backfill. The InputSettlerEscrow address itself is verified (OIF-1); this is a \
+             missing feature, not an unverified address."
         ),
         other => anyhow::bail!(
             "unknown source '{other}'. Known sources: 'uniswapx' (no key), \

@@ -31,7 +31,7 @@ Rust workspace, 6 крейтів + live-підсистема + дашборд. �
 | Крейт | Відповідальність |
 |---|---|
 | `types` | `NormalizedIntent`, `Quote`, `AssetAmount`, `ChainId`, `FillPolicy`, `SettlementType`, `TxRef` |
-| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/<source>/`, `ws`, `stream`, `heartbeat`) → нормалізація в один формат |
+| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/` — `LiveSource` trait, `ws` transport, shared; `across/`'s and `oif/`'s own live adapters) + `oif/` (`deployments`, `event`, `live`) → нормалізація в один формат |
 | `pricing` | газ (`gas`/`fee_history_gas`), сорсинг (`odos`), offline |
 | `router` | **серце edge** (`v0`): asset-class routing, decay, confidence, `QuoteOutcome`/`SkipReason`; ціни (`prices`/`live_prices`) |
 | `backtest` | `load` (dedup+hygiene), `metrics` (+ would_fill-калібрування), `report`, `dest_summary` |
