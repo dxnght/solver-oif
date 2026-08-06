@@ -22,7 +22,6 @@ use solver_types::ChainId;
 /// Default on-disk locations per source.
 const UNISWAPX_DATA_DIR: &str = "data/uniswapx";
 const ACROSS_DATA_DIR: &str = "data/across";
-const DATA_DIR: &str = "data";
 
 #[derive(Parser)]
 #[command(name = "solver", version, about = "Cross-chain intent engine (ERC-7683 / OIF) — research tooling")]
@@ -46,6 +45,12 @@ enum Command {
         /// Output directory for the report.
         #[arg(long, default_value = "reports/run")]
         out_dir: String,
+        /// Input directory to scan (recursively) for `*.jsonl`. Default is
+        /// all of `data/` (every ingested source); narrow this to reproduce
+        /// a report generated when the source mix on disk was different,
+        /// e.g. `data/uniswapx` alone.
+        #[arg(long, default_value = "data")]
+        data_dir: String,
         /// Price the long-tail via live CoinGecko (by contract address) instead
         /// of the static feed. Default off (deterministic CI).
         #[arg(long)]
@@ -149,12 +154,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
-        Command::Backtest { out_dir, live_prices, live_gas, reproducible } => {
+        Command::Backtest { out_dir, data_dir, live_prices, live_gas, reproducible } => {
             // Backtest defaults to static gas (deterministic CI); --live-gas
             // opts into the ladder, --reproducible forces static.
             let (prices, gas) =
                 build_pricing(live_prices && !reproducible, live_gas && !reproducible);
-            run_backtest(&out_dir, prices, gas).await
+            run_backtest(&data_dir, &out_dir, prices, gas).await
         }
         Command::Live {
             chains,
@@ -242,10 +247,10 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
     }
 }
 
-async fn run_backtest(out_dir: &str, prices: PriceSource, gas: GasSource) -> anyhow::Result<()> {
+async fn run_backtest(data_dir: &str, out_dir: &str, prices: PriceSource, gas: GasSource) -> anyhow::Result<()> {
     let (prices_label, gas_label) = (prices.label(), gas.label());
     let summary =
-        solver_backtest::run(std::path::Path::new(DATA_DIR), std::path::Path::new(out_dir), &prices, gas)
+        solver_backtest::run(std::path::Path::new(data_dir), std::path::Path::new(out_dir), &prices, gas)
             .await?;
     let m = &summary.metrics;
     println!(
