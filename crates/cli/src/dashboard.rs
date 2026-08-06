@@ -339,15 +339,24 @@ async fn serve_events(
         let snap: Vec<String> = buf.iter().cloned().collect();
         (snap, tx.subscribe())
     };
+    // Tagged `event: replay` — these records are already reflected in
+    // whatever `/aggregates` snapshot the client has or is about to fetch
+    // (they were written to disk, and so counted by `aggregates::compute`,
+    // before ever reaching this buffer). The client must not re-bump its
+    // running totals for them, or a client that finishes fetching
+    // `/aggregates` before this burst finishes double-counts the whole
+    // replay buffer — a race that flip-flopped the headline total between
+    // two values depending on which finished first. Only genuinely new
+    // decisions (below, untagged → default "message" event) may bump.
     for json in snapshot {
-        write_event(&mut stream, &json).await?;
+        write_event(&mut stream, Some("replay"), &json).await?;
     }
     stream.flush().await?;
 
     loop {
         match rx.recv().await {
             Ok(json) => {
-                write_event(&mut stream, &json).await?;
+                write_event(&mut stream, None, &json).await?;
                 stream.flush().await?;
             }
             // Slow client: skip the gap rather than stall the publisher.
@@ -359,9 +368,16 @@ async fn serve_events(
     Ok(())
 }
 
-/// Write one SSE `data:` event. `json` is a single line (serde emits no
-/// newlines), so one `data:` field carries the whole record.
-async fn write_event(stream: &mut TcpStream, json: &str) -> std::io::Result<()> {
+/// Write one SSE event. `json` is a single line (serde emits no newlines), so
+/// one `data:` field carries the whole record. `event` names the frame
+/// (`Some("replay")` for the initial buffer, `None` for a live push — the
+/// default unnamed `"message"` event `EventSource.onmessage` listens for).
+async fn write_event(stream: &mut TcpStream, event: Option<&str>, json: &str) -> std::io::Result<()> {
+    if let Some(name) = event {
+        stream.write_all(b"event: ").await?;
+        stream.write_all(name.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+    }
     stream.write_all(b"data: ").await?;
     stream.write_all(json.as_bytes()).await?;
     stream.write_all(b"\n\n").await
@@ -563,6 +579,55 @@ mod tests {
         assert_eq!(back.reason, rec.reason);
         assert_eq!(back.would_fill, rec.would_fill);
         assert_eq!(back.verify_url, rec.verify_url);
+    }
+
+    /// Read raw bytes off `s` until the accumulated buffer contains `needle`,
+    /// returning everything read so far. Shared by the replay-vs-live test
+    /// below, which needs to read two frames off the same connection without
+    /// dropping bytes between reads (a fresh buffer per read would lose
+    /// whatever the previous read over-consumed past its own needle).
+    async fn read_until(s: &mut TcpStream, buf: &mut Vec<u8>, needle: &str) {
+        let mut tmp = [0u8; 1024];
+        while !String::from_utf8_lossy(buf).contains(needle) {
+            let n = s.read(&mut tmp).await.expect("read");
+            assert!(n > 0, "connection closed before {needle:?} arrived");
+            buf.extend_from_slice(&tmp[..n]);
+        }
+    }
+
+    /// The double-count bug: a page load races `fetch("/aggregates")`
+    /// against the `/events` replay burst, and both cover the same recent
+    /// decisions — the replay buffer's records are already reflected in any
+    /// `/aggregates` snapshot computed after they were written to disk. The
+    /// fix is tagging replay frames `event: replay` so the client knows not
+    /// to re-bump its running total for them, while a genuinely new decision
+    /// (pushed after the client is already subscribed) stays untagged, since
+    /// nothing has counted it yet.
+    #[tokio::test]
+    async fn replay_frames_are_tagged_live_frames_are_not() {
+        let h = serve(0).await.expect("serve");
+        h.publish(&sample_record()); // lands only in the replay buffer
+
+        let mut s = TcpStream::connect(h.addr).await.expect("connect");
+        s.write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+
+        let mut buf = Vec::new();
+        let read_replay = read_until(&mut s, &mut buf, "\n\n");
+        tokio::time::timeout(Duration::from_secs(5), read_replay).await.expect("replay frame timed out");
+        let text = String::from_utf8_lossy(&buf);
+        let body = &text[text.find("\r\n\r\n").expect("http headers") + 4..];
+        assert!(body.starts_with("event: replay\r\n") || body.starts_with("event: replay\n"), "expected a tagged replay frame, got:\n{body}");
+
+        // Publish AFTER the client is already subscribed — the live path.
+        h.publish(&sample_record());
+        buf.clear();
+        let read_live = read_until(&mut s, &mut buf, "\n\n");
+        tokio::time::timeout(Duration::from_secs(5), read_live).await.expect("live frame timed out");
+        let live = String::from_utf8_lossy(&buf);
+        assert!(!live.contains("event: replay"), "a live push must not be tagged replay, got:\n{live}");
+        assert!(live.starts_with("data: "), "expected an untagged (default \"message\") frame, got:\n{live}");
     }
 
     /// A live decision published while a client is connected is pushed without

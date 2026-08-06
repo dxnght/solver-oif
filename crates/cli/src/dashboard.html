@@ -220,11 +220,17 @@ function bumpWindow(w, rec) {
   w.dest_chains[dest] = (w.dest_chains[dest] || 0) + 1;
 }
 
-function ingest(rec) {
+// `bumpAgg = false` for the SSE replay burst a fresh connection gets: those
+// records are already counted in whatever `/aggregates` snapshot the client
+// has or is about to fetch (they were on disk, and so in that snapshot,
+// before ever reaching the replay buffer). Re-bumping them race-doubled the
+// headline total against a concurrent `fetchAggregates()` — whichever
+// finished first decided if the replay burst got double-counted.
+function ingest(rec, bumpAgg = true) {
   bump(state.minutes, Math.floor(Date.now() / 60000));
   state.feed.unshift(rec);
   if (state.feed.length > FEED_CAP) state.feed.pop();
-  if (aggData) {
+  if (bumpAgg && aggData) {
     bumpWindow(aggData.last_24h, rec);
     bumpWindow(aggData.last_7d, rec);
     renderAggregates();
@@ -423,6 +429,13 @@ function setStatus(text, cls) {
 const es = new EventSource("/events");
 es.onopen = () => setStatus("● live", "live");
 es.onerror = () => setStatus("● reconnecting…", "down");
+// The server tags the initial buffer replay as `event: replay` (no aggregate
+// bump — see `ingest`'s `bumpAgg` note); a genuinely new decision arrives as
+// the default unnamed event, which `onmessage` alone receives.
+es.addEventListener("replay", (ev) => {
+  try { ingest(JSON.parse(ev.data), false); }
+  catch (e) { /* ignore a malformed frame, keep the stream alive */ }
+});
 es.onmessage = (ev) => {
   try { ingest(JSON.parse(ev.data)); }
   catch (e) { /* ignore a malformed frame, keep the stream alive */ }
