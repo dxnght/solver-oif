@@ -67,7 +67,7 @@ cargo build --workspace && cargo clippy --workspace -- -D warnings && cargo test
 ./target/release/solver backtest --out-dir reports/<run>
 
 # Live shadow (потрібні ACROSS_WS_* / OIF_WS_*; без них джерело idle — і каже про це):
-./target/release/solver live --chains base,arbitrum,optimism --sources across \
+./target/release/solver live --chains base,arbitrum,optimism --sources across,oif \
     --dashboard-port 8088 --duration 600 --out reports/live
 ```
 

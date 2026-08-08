@@ -65,6 +65,13 @@ source .env #must! otherwise - warnings.
 ./target/release/solver live --chains base,arbitrum,optimism --sources across --live-prices --dashboard-port 8088
 ```
 
+Live shadow both across & oif (ACROSS*WS*_ / OIF*WS*_):
+
+```bash
+./target/release/solver live --chains base,arbitrum,optimism --sources across,oif \
+--dashboard-port 8088 --duration 600 --out reports/live
+```
+
 ## Architecture
 
 A 6-crate workspace: `types` (data model), `ingest` (historical + live sources),
