@@ -272,8 +272,10 @@ correctness. Валюація ноги **не** вгадує scale: збереж
   `eth_getTransactionReceipt` з публічного RPC — не Etherscan; (3) `cast
   abi-decode` цього ж логу тим самим tuple-типом дав осмислені реальні
   значення ще до жодного Rust-коду: input-токен `0x833589fc…` = Base USDC,
-  output settler `0x52602D7c…` = вже верифікований `OutputSettlerSimple`
-  (OIF-1), output-токен `0x3c499c54…` = Polygon USDC; (4) Blockscout
+  output settler `0x52602D7c…` (за назвою — ймовірно `OutputSettlerSimple`,
+  але **не** верифіковано незалежно: OIF-1 перевірив лише
+  `InputSettlerEscrow`, деталі в `deployments.rs`), output-токен
+  `0x3c499c54…` = Polygon USDC; (4) Blockscout
   незалежно задекодував той самий лог і дав ідентичну tuple-форму. Фікстура
   (`testdata/open_base_usdc_to_polygon.json`) і всі чотири звірки — тести в
   `oif::event`.

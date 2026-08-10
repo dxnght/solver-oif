@@ -21,8 +21,9 @@
 //! 3. The real log's `data` independently decoded with `cast abi-decode`
 //!    against the *exact same* tuple shape used below — before any Rust code
 //!    ran, `cast` alone recovered sane real values: input token
-//!    `0x833589fc…` = Base USDC, output settler `0x52602D7c…` =
-//!    `OutputSettlerSimple` (the OIF-1-verified address), output token
+//!    `0x833589fc…` = Base USDC, output settler `0x52602D7c…` (presumed
+//!    `OutputSettlerSimple` by name — **not** independently verified; OIF-1
+//!    only checked `InputSettlerEscrow`, see `deployments.rs`), output token
 //!    `0x3c499c54…` = Polygon USDC (both already in
 //!    [`solver_types::amount::STABLE_ADDRS`]).
 //! 4. [Blockscout](https://base.blockscout.com)'s own independent ABI decode
@@ -146,9 +147,10 @@ mod tests {
     /// The real log's `data` decodes through the `sol!` binding into sane,
     /// independently-verifiable values — not just a topic0 match. Single
     /// input, single output (validates scoping the adapter to that case
-    /// first): Base USDC in, Polygon USDC out, routed through the OIF-1
-    /// verified `OutputSettlerSimple` as the output settler. Every value here
-    /// was cross-checked by hand with `cast abi-decode` before this test was
+    /// first): Base USDC in, Polygon USDC out, routed through an output
+    /// settler (`0x52602D7c…`, presumed `OutputSettlerSimple` by name — not
+    /// independently verified, see module docs). Every value here was
+    /// cross-checked by hand with `cast abi-decode` before this test was
     /// written (see module docs) — this test locks that same decode in Rust.
     #[test]
     fn open_log_decodes_to_real_order() {
@@ -193,7 +195,8 @@ mod tests {
             "0x00000000000000000000000052602d7cc3d833f5d28ee6d01c7f82c9b2322e10"
                 .parse::<B256>()
                 .unwrap(),
-            "output settler must be the OIF-1-verified OutputSettlerSimple"
+            "output settler decode must match the real captured log (presumed \
+             OutputSettlerSimple by name — not independently verified, see module docs)"
         );
         assert_eq!(out.amount, U256::from(143_000u64)); // 0.143 USDC (6dp)
     }
