@@ -10,6 +10,7 @@ mod aggregates;
 mod dashboard;
 mod doctor;
 mod live;
+mod retention;
 
 use std::path::PathBuf;
 
@@ -92,6 +93,12 @@ enum Command {
         /// (`eth_blockNumber` + `eth_getLogs`), regardless of chain activity.
         #[arg(long, default_value_t = solver_ingest::live::poll::DEFAULT_POLL_INTERVAL.as_secs())]
         poll_interval_secs: u64,
+        /// Delete decisions-*.jsonl older than N calendar days (checked every
+        /// heartbeat). Keeps a 24/7 service's disk use bounded. 0 = keep
+        /// forever. Below 8 truncates the dashboard's 7d window (a loud
+        /// startup WARN, not silence) — see `retention` module docs.
+        #[arg(long, default_value_t = retention::DEFAULT_RETENTION_DAYS)]
+        retention_days: i64,
         /// Serve a live observability dashboard on `127.0.0.1:<port>` (SSE of
         /// the same shadow decisions). Omit to keep the plain B4 behavior.
         #[arg(long)]
@@ -180,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
             duration,
             out,
             poll_interval_secs,
+            retention_days,
             dashboard_port,
             live_prices,
             static_gas,
@@ -202,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
                 duration,
                 out_dir: out,
                 poll_interval: std::time::Duration::from_secs(poll_interval_secs),
+                retention_days,
                 dashboard_port,
             };
             live::run(config, prices, gas).await

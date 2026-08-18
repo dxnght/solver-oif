@@ -112,12 +112,32 @@ pub struct LiveConfig {
     /// How often each chain is polled (POLL-1 — checkpointed `eth_getLogs`,
     /// not a WS push).
     pub poll_interval: StdDuration,
+    /// Delete `decisions-*.jsonl` older than this many calendar days, checked
+    /// every heartbeat (`crate::retention`). `0` = keep forever.
+    pub retention_days: i64,
     pub dashboard_port: Option<u16>,
 }
 
 /// Run the live shadow loop — see [`LiveConfig`] for the run parameters.
 pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Result<()> {
-    let LiveConfig { chains, sources, duration, out_dir, poll_interval, dashboard_port } = config;
+    let LiveConfig {
+        chains,
+        sources,
+        duration,
+        out_dir,
+        poll_interval,
+        retention_days,
+        dashboard_port,
+    } = config;
+    if retention_days > 0 && retention_days < crate::retention::MIN_SAFE_RETENTION_DAYS {
+        warn!(
+            retention_days,
+            min_safe = crate::retention::MIN_SAFE_RETENTION_DAYS,
+            "retention_days is below the safe floor — the dashboard's 7d aggregate \
+             window may be truncated (some records up to 7 days old could already \
+             be pruned before the window reads them)"
+        );
+    }
 
     // Source selection: one LiveSource per recognized name. An unknown name
     // is announced, not silent (rule #7).
@@ -221,6 +241,15 @@ pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Res
                 if let Some(d) = &dashboard {
                     let agg = crate::aggregates::compute(Path::new(&out_dir), Utc::now());
                     d.set_aggregates(agg);
+                }
+                // Retention: same cadence, cheap directory scan (a handful of
+                // files at this scale) — deletes nothing unless a file has
+                // actually aged out (rule #7: loud only when something happens).
+                let pruned = crate::retention::prune_old_decisions(
+                    Path::new(&out_dir), Utc::now().date_naive(), retention_days,
+                );
+                if !pruned.is_empty() {
+                    info!(count = pruned.len(), retention_days, "retention: pruned old decisions files");
                 }
             }
             maybe = rx.recv() => match maybe {
