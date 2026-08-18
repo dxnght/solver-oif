@@ -1,10 +1,11 @@
-//! OIF live source: subscribes to origin-chain `InputSettlerEscrow` `Open`
-//! events, the OIF analog of [`crate::live::AcrossLive`]'s `FundsDeposited`
-//! subscription (same shadow philosophy — zero transactions, B4 pattern).
+//! OIF live source: polls origin-chain `InputSettlerEscrow` `Open` events, the
+//! OIF analog of [`crate::live::AcrossLive`]'s `FundsDeposited` poll (same
+//! shadow philosophy — zero transactions).
 //!
-//! Reuses the **same** generic `eth_subscribe("logs")` transport
-//! ([`crate::live::ws`]) Across uses; only the address/topic0 being
-//! subscribed to and the log→[`NormalizedIntent`] decode differ.
+//! Reuses the **same** checkpointed `eth_getLogs` transport ([`crate::live::poll`])
+//! Across uses, over the **same** `ACROSS_RPC_<CHAIN>` endpoint (chain-generic,
+//! not Across-specific — see [`crate::live::across_rpc_var`] docs); only the
+//! address/topic0 being polled and the log→[`NormalizedIntent`] decode differ.
 //!
 //! **First-cut scope guard:** `StandardOrder` can in principle carry more
 //! than one input and more than one output (see `oif::event` docs), but
@@ -15,12 +16,15 @@
 //! silent drop of data into a wrong shape) anything else — the honest PENDING
 //! stance (CLAUDE.md rule #2), not a guess.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use solver_types::{
     known_decimals, AssetAmount, ChainId, IntentId, NormalizedIntent, SettlementType, Source,
@@ -28,7 +32,7 @@ use solver_types::{
 };
 
 use crate::across::addr_from_bytes32;
-use crate::live::{ws, LiveSource, SourceKind};
+use crate::live::{across_rpc_var, poll, LiveSource, SourceKind};
 use crate::oif::{input_settler_escrow, Open};
 
 /// Channel depth — same rationale/size as the Across live path (LOG_BUFFER /
@@ -36,18 +40,12 @@ use crate::oif::{input_settler_escrow, Open};
 /// never drops a log at OIF's current (low) real-world order rate.
 const INTENT_BUFFER: usize = 256;
 
-/// Environment variable holding a chain's OIF WS endpoint — same
-/// `<SOURCE>_WS_<CHAIN>` convention as [`crate::live::across_ws_var`].
-pub fn oif_ws_var(chain: ChainId) -> String {
-    format!("OIF_WS_{}", chain.name().to_uppercase())
-}
-
-/// A chain ready for a live OIF subscription: a verified `InputSettlerEscrow`
-/// (OIF-1) **and** a resolved, non-empty `OIF_WS_<CHAIN>`.
+/// A chain ready for a live OIF poll: a verified `InputSettlerEscrow`
+/// (OIF-1) **and** a resolved, non-empty `ACROSS_RPC_<CHAIN>`.
 #[derive(Debug, Clone)]
 struct OpenChain {
     chain: ChainId,
-    ws_url: String,
+    rpc_url: String,
     settler: Address,
 }
 
@@ -63,9 +61,9 @@ where
     let mut open = Vec::new();
     let mut idle = Vec::new();
     for &chain in chains {
-        match (input_settler_escrow(chain), resolve(&oif_ws_var(chain))) {
+        match (input_settler_escrow(chain), resolve(&across_rpc_var(chain))) {
             (Some(settler), Some(url)) if !url.trim().is_empty() => {
-                open.push(OpenChain { chain, ws_url: url, settler });
+                open.push(OpenChain { chain, rpc_url: url, settler });
             }
             _ => idle.push(chain),
         }
@@ -83,19 +81,19 @@ fn addr_from_u256(v: U256) -> Address {
 
 /// Decode a live OIF `Open` log (observed on origin `origin_chain`) into a
 /// [`NormalizedIntent`]. Mirrors [`crate::live::normalize_deposit`]'s shape:
-/// `origin_chain` is the subscribed chain, the intent is still open
+/// `origin_chain` is the polled chain, the intent is still open
 /// (`winning_filler`/`realized_output` both `None`), `observed_at` is the
 /// wall clock, and `tx_ref` points at the origin `open()` tx.
 ///
 /// Errors (all a `WARN`-and-skip at the call site, never a panic): the log
 /// doesn't decode as `Open`; `order.originChainId` disagrees with the chain
-/// we're subscribed to (would mean a misconfigured `OIF_WS_<CHAIN>` pointed
-/// at the wrong network — the contract itself refuses to let `open()` succeed
+/// we're polling (would mean a misconfigured `ACROSS_RPC_<CHAIN>` pointed at
+/// the wrong network — the contract itself refuses to let `open()` succeed
 /// with a mismatched `originChainId`, so this should be unreachable on a
-/// correctly-configured subscription, but checking costs nothing and a silent
+/// correctly-configured poll, but checking costs nothing and a silent
 /// wrong-chain label is exactly the failure mode rule #9 exists to catch);
 /// not exactly one input and one output (see module scope-guard docs).
-pub fn normalize_open(origin_chain: ChainId, log: &ws::WsLog) -> Result<NormalizedIntent> {
+pub fn normalize_open(origin_chain: ChainId, log: &poll::RawLog) -> Result<NormalizedIntent> {
     let topics: Vec<B256> = log
         .topics
         .iter()
@@ -110,8 +108,8 @@ pub fn normalize_open(origin_chain: ChainId, log: &ws::WsLog) -> Result<Normaliz
         .map_err(|_| anyhow::anyhow!("originChainId {} exceeds u64", order.originChainId))?;
     if event_origin != origin_chain.0 {
         anyhow::bail!(
-            "Open log's originChainId ({event_origin}) does not match the subscribed chain \
-             ({origin_chain}) — check OIF_WS_{} points at the right network",
+            "Open log's originChainId ({event_origin}) does not match the polled chain \
+             ({origin_chain}) — check ACROSS_RPC_{} points at the right network",
             origin_chain.name().to_uppercase()
         );
     }
@@ -167,17 +165,19 @@ pub fn normalize_open(origin_chain: ChainId, log: &ws::WsLog) -> Result<Normaliz
     })
 }
 
-/// OIF live source: subscribes to origin-chain `InputSettlerEscrow` `Open`
-/// events. Mirrors [`crate::live::AcrossLive`] exactly at the `LiveSource`
-/// boundary — `solver live --sources oif` gets the same idle/open legibility
-/// and shutdown semantics.
+/// OIF live source: polls origin-chain `InputSettlerEscrow` `Open` events.
+/// Mirrors [`crate::live::AcrossLive`] exactly at the `LiveSource` boundary —
+/// `solver live --sources oif` gets the same idle/open legibility and
+/// shutdown semantics.
 pub struct OifLive {
     chains: Vec<ChainId>,
+    checkpoint_dir: PathBuf,
+    interval: Duration,
 }
 
 impl OifLive {
-    pub fn new(chains: Vec<ChainId>) -> Self {
-        Self { chains }
+    pub fn new(chains: Vec<ChainId>, checkpoint_dir: impl Into<PathBuf>, interval: Duration) -> Self {
+        Self { chains, checkpoint_dir: checkpoint_dir.into(), interval }
     }
 }
 
@@ -191,44 +191,47 @@ impl LiveSource for OifLive {
 
         let open_names: Vec<&str> = open.iter().map(|o| o.chain.name()).collect();
         let idle_names: Vec<&str> = idle.iter().map(|c| c.name()).collect();
-        info!(source = "oif", open = ?open_names, idle = ?idle_names, "live real-time inventory");
+        info!(source = "oif", open = ?open_names, idle = ?idle_names, "live real-time-ish inventory (poll)");
         for c in &idle {
-            warn!(source = "oif", chain = %c, var = %oif_ws_var(*c),
-                "no OIF_WS endpoint (or no verified InputSettlerEscrow) — chain idle");
+            warn!(source = "oif", chain = %c, var = %across_rpc_var(*c),
+                "no ACROSS_RPC endpoint (or no verified InputSettlerEscrow) — chain idle");
         }
 
         let (tx, rx) = mpsc::channel(INTENT_BUFFER);
         if open.is_empty() {
-            warn!(source = "oif", "no real-time open source — idle");
+            warn!(source = "oif", "no real-time-ish open source — idle");
             return (SourceKind::Idle, rx);
         }
         for oc in open {
-            spawn_chain(oc, tx.clone());
+            spawn_chain(oc, self.checkpoint_dir.clone(), self.interval, tx.clone());
         }
         drop(tx);
         (SourceKind::RealtimeOpen, rx)
     }
 }
 
-/// Wire one open chain: a transport task ([`ws::stream_logs`]) feeding a
+/// Wire one open chain: a transport task ([`poll::poll_loop`]) feeding a
 /// decode task that normalizes each log onto the shared intents channel —
 /// identical structure to Across's `spawn_chain`.
-fn spawn_chain(oc: OpenChain, intents: mpsc::Sender<NormalizedIntent>) {
+fn spawn_chain(
+    oc: OpenChain,
+    checkpoint_dir: PathBuf,
+    interval: Duration,
+    intents: mpsc::Sender<NormalizedIntent>,
+) {
     let chain = oc.chain;
-    let cfg = ws::WsConfig {
-        ws_url: oc.ws_url,
+    let cfg = poll::PollConfig {
+        rpc_url: oc.rpc_url,
         address: oc.settler.to_string(),
         topic0: format!("{:#x}", Open::SIGNATURE_HASH),
         label: chain.name().to_string(),
+        checkpoint_path: checkpoint_dir.join(format!("checkpoint-oif-{}.json", chain.name())),
+        interval,
     };
 
-    let (log_tx, mut log_rx) = mpsc::channel::<ws::WsLog>(256);
+    let (log_tx, mut log_rx) = mpsc::channel::<poll::RawLog>(256);
 
-    tokio::spawn(async move {
-        if let Err(e) = ws::stream_logs(cfg, log_tx).await {
-            error!(chain = %chain, error = %e, "live WS source stopped (fatal)");
-        }
-    });
+    tokio::spawn(poll::poll_loop(cfg, log_tx));
 
     tokio::spawn(async move {
         while let Some(log) = log_rx.recv().await {
@@ -252,16 +255,16 @@ mod tests {
     /// — independent truth for the normalize path too, not a synthetic log.
     const REAL_OPEN_LOG: &str = include_str!("testdata/open_base_usdc_to_polygon.json");
 
-    fn real_open_log() -> ws::WsLog {
+    fn real_open_log() -> poll::RawLog {
         let env: serde_json::Value = serde_json::from_str(REAL_OPEN_LOG).unwrap();
         serde_json::from_value(env["result"][0].clone()).unwrap()
     }
 
-    /// The env-var convention is `OIF_WS_<UPPER-CHAIN-NAME>` — matches
-    /// `doctor`/README expectations for the Across analog.
+    /// OIF now resolves the **same** `ACROSS_RPC_<CHAIN>` var Across polling
+    /// (and the gas ladder) already use — no separate OIF-specific env surface.
     #[test]
-    fn ws_var_name_is_oif_ws_upper_chain() {
-        assert_eq!(oif_ws_var(ChainId::BASE), "OIF_WS_BASE");
+    fn classify_uses_shared_across_rpc_var() {
+        assert_eq!(across_rpc_var(ChainId::BASE), "ACROSS_RPC_BASE");
     }
 
     /// `addr_from_u256` recovers the low-20-byte EVM address from a packed
@@ -311,7 +314,7 @@ mod tests {
         );
     }
 
-    /// A wrong subscribed-chain label (the "connected `OIF_WS_<CHAIN>` to the
+    /// A wrong polled-chain label (the "pointed `ACROSS_RPC_<CHAIN>` at the
     /// wrong network" misconfiguration) must be a loud error, not a
     /// mislabeled intent — the real order's `originChainId` is Base, so
     /// claiming it was observed on Arbitrum must fail.
@@ -319,6 +322,6 @@ mod tests {
     fn normalize_open_rejects_origin_chain_mismatch() {
         let log = real_open_log();
         let err = normalize_open(ChainId::ARBITRUM, &log).unwrap_err().to_string();
-        assert!(err.contains("does not match the subscribed chain"), "got: {err}");
+        assert!(err.contains("does not match the polled chain"), "got: {err}");
     }
 }

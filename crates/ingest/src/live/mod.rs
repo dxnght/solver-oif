@@ -1,31 +1,35 @@
-//! Live (real-time) intent sources for the Phase-1 shadow run.
+//! Live (real-time-ish) intent sources for the Phase-1 shadow run.
 //!
 //! Where the historical Across path scans **destination**-chain `FilledRelay`
-//! logs after the fact (see [`crate::across`]), the live path subscribes to
-//! **origin**-chain `FundsDeposited` logs as they happen and runs the same
+//! logs after the fact (see [`crate::across`]), the live path polls
+//! **origin**-chain `FundsDeposited` logs on a fixed cadence and runs the same
 //! shadow router/policy decision — zero transactions (`solver-engine-spec.md`
 //! §0, Phase 1).
 //!
-//! [`ws`] is the transport (a thin `eth_subscribe("logs")` WebSocket client).
-//! This module adds the [`LiveSource`] trait (an async stream of
+//! [`poll`] is the transport (checkpointed `eth_getLogs` HTTP polling — see
+//! its module docs for why this replaced the earlier WS `eth_subscribe`
+//! push). This module adds the [`LiveSource`] trait (an async stream of
 //! [`NormalizedIntent`]) and the Across adapter on top: it resolves
-//! `ACROSS_WS_<CHAIN>` per requested origin chain, subscribes to that chain's
+//! `ACROSS_RPC_<CHAIN>` per requested origin chain, polls that chain's
 //! [`spoke_pool`] + the `FundsDeposited` `topic0`, and decodes each log via
 //! [`normalize_deposit`].
 //!
-//! Legibility (CLAUDE.md rule #7): which chains are *open* (a WS endpoint is
+//! Legibility (CLAUDE.md rule #7): which chains are *open* (an RPC endpoint is
 //! configured) vs *idle* (none) is announced at startup and reflected in
-//! [`SourceKind`]; a chain with no `ACROSS_WS_<CHAIN>` is a loud WARN + skip,
+//! [`SourceKind`]; a chain with no `ACROSS_RPC_<CHAIN>` is a loud WARN + skip,
 //! never a crash and never silence.
 
-pub mod ws;
+pub mod poll;
+
+use std::path::PathBuf;
+use std::time::Duration;
 
 use alloy_primitives::{Address, B256};
 use alloy_sol_types::SolEvent;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use solver_types::{
     known_decimals, AssetAmount, ChainId, ExclusivityWindow, IntentId, NormalizedIntent,
@@ -40,53 +44,54 @@ use crate::across::{addr_from_bytes32, spoke_pool, FundsDeposited};
 const LOG_BUFFER: usize = 256;
 const INTENT_BUFFER: usize = 256;
 
-/// Whether a live source currently has any real-time open subscription, or is
-/// idle (nothing configured). Pure legibility — surfaced at startup so a silent
-/// "subscribed but nothing happens" run is impossible (rule #7).
+/// Whether a live source currently has any real-time-ish open poll, or is
+/// idle (nothing configured). Pure legibility — surfaced at startup so a
+/// silent "polling but nothing happens" run is impossible (rule #7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
-    /// At least one chain has a configured WS endpoint and verified SpokePool.
+    /// At least one chain has a configured RPC endpoint and verified SpokePool.
     RealtimeOpen,
     /// Nothing configured — the source produces no intents (and says so).
     Idle,
 }
 
-/// A real-time intent source: spawns its subscriptions and streams normalized
-/// intents out on an [`mpsc::Receiver`] (the async stream). One implementation
-/// today — Across deposits ([`AcrossLive`]); OIF stays idle until its address
-/// is verified (it is not, rule #2).
+/// A real-time-ish intent source: spawns its poll loops and streams normalized
+/// intents out on an [`mpsc::Receiver`] (the async stream). Two implementations
+/// — Across deposits ([`AcrossLive`]) and OIF `Open` orders (`crate::oif::OifLive`).
 ///
-/// The caller drives the receiver and drops it to stop; the underlying transport
-/// tasks observe the drop and shut down ([`ws::stream_logs`]).
+/// The caller drives the receiver and drops it to stop; the underlying poll
+/// tasks observe the drop and shut down ([`poll::poll_loop`]).
 pub trait LiveSource {
     /// Source name for logs / output filenames (e.g. `"across"`).
     fn name(&self) -> &'static str;
 
-    /// Spawn the subscriptions and return `(kind, receiver)`. `kind` reports
+    /// Spawn the poll loops and return `(kind, receiver)`. `kind` reports
     /// whether the source is actually open or idle; `receiver` yields each
     /// decoded [`NormalizedIntent`].
     fn spawn(&self) -> (SourceKind, mpsc::Receiver<NormalizedIntent>);
 }
 
-/// Environment variable holding a chain's Across WS endpoint: the convention is
-/// `ACROSS_WS_<CHAIN>` where `<CHAIN>` is the upper-cased [`ChainId::name`]
-/// (e.g. `ACROSS_WS_ARBITRUM`). A free function so the naming is testable and
-/// matches what `doctor` (LIV-5) probes.
-pub fn across_ws_var(chain: ChainId) -> String {
-    format!("ACROSS_WS_{}", chain.name().to_uppercase())
+/// Environment variable holding a chain's JSON-RPC HTTP endpoint. Named for
+/// its original use (the `eth_feeHistory` live-gas rung, `pricing::fee_history_gas`)
+/// but it is a **chain-generic** RPC endpoint, not Across-specific — this
+/// module and [`crate::oif::live`] both poll `eth_getLogs`/`eth_blockNumber`
+/// against the same var, so one configured endpoint per chain covers gas,
+/// Across-poll, and OIF-poll at once (rule #5: no duplicated config surface).
+pub fn across_rpc_var(chain: ChainId) -> String {
+    format!("ACROSS_RPC_{}", chain.name().to_uppercase())
 }
 
-/// A chain ready for a live subscription: it has both a verified SpokePool and
-/// a resolved (non-empty) WS endpoint.
+/// A chain ready for a live poll: it has both a verified SpokePool and a
+/// resolved (non-empty) RPC endpoint.
 #[derive(Debug, Clone)]
 pub struct OpenChain {
     pub chain: ChainId,
-    pub ws_url: String,
+    pub rpc_url: String,
     pub spoke: Address,
 }
 
 /// Split requested origin chains into *open* (verified SpokePool **and** a
-/// non-empty `ACROSS_WS_<CHAIN>`) and *idle* (missing var, or no verified
+/// non-empty `ACROSS_RPC_<CHAIN>`) and *idle* (missing var, or no verified
 /// SpokePool). `resolve` injects the env lookup so the split is unit-testable
 /// without touching the process environment.
 pub fn classify<F>(chains: &[ChainId], resolve: F) -> (Vec<OpenChain>, Vec<ChainId>)
@@ -96,9 +101,9 @@ where
     let mut open = Vec::new();
     let mut idle = Vec::new();
     for &chain in chains {
-        match (spoke_pool(chain), resolve(&across_ws_var(chain))) {
+        match (spoke_pool(chain), resolve(&across_rpc_var(chain))) {
             (Some(spoke), Some(url)) if !url.trim().is_empty() => {
-                open.push(OpenChain { chain, ws_url: url, spoke });
+                open.push(OpenChain { chain, rpc_url: url, spoke });
             }
             _ => idle.push(chain),
         }
@@ -110,15 +115,15 @@ where
 /// into a [`NormalizedIntent`].
 ///
 /// Mirrors the historical [`crate::across::client`] fill normalize, but for the
-/// **deposit** (open) side: `origin_chain` is the subscribed chain; `dest_chain`
+/// **deposit** (open) side: `origin_chain` is the polled chain; `dest_chain`
 /// is the event's `destinationChainId`; `tx_ref` points at the **origin**
 /// deposit tx (not dest); and a deposit is still open, so `realized_output` and
-/// `winning_filler` are `None`, `observed_at` is the wall clock (we see it now),
-/// and the settlement constant is the same shared [`ACROSS_OO_LIVENESS_SECS`] as
-/// the historical path. The `id` scheme matches the fill side
-/// (`across:{origin}:{dest}:{depositId}`) so a deposit and its eventual fill
-/// share one [`IntentId`].
-pub fn normalize_deposit(origin_chain: ChainId, log: &ws::WsLog) -> Result<NormalizedIntent> {
+/// `winning_filler` are `None`, `observed_at` is the wall clock (we see it at
+/// poll time, up to one interval after the deposit landed), and the settlement
+/// constant is the same shared [`ACROSS_OO_LIVENESS_SECS`] as the historical
+/// path. The `id` scheme matches the fill side (`across:{origin}:{dest}:{depositId}`)
+/// so a deposit and its eventual fill share one [`IntentId`].
+pub fn normalize_deposit(origin_chain: ChainId, log: &poll::RawLog) -> Result<NormalizedIntent> {
     let topics: Vec<B256> = log
         .topics
         .iter()
@@ -138,7 +143,8 @@ pub fn normalize_deposit(origin_chain: ChainId, log: &ws::WsLog) -> Result<Norma
     let in_dec = known_decimals(in_tok);
     let out_dec = known_decimals(out_tok);
 
-    // Open / real-time: we observe the deposit now. `fillDeadline` bounds it.
+    // Open / real-time-ish: we observe the deposit at poll time. `fillDeadline`
+    // bounds it.
     let observed_at = Utc::now();
     let deadline =
         DateTime::<Utc>::from_timestamp(ev.fillDeadline as i64, 0).unwrap_or(observed_at);
@@ -166,7 +172,7 @@ pub fn normalize_deposit(origin_chain: ChainId, log: &ws::WsLog) -> Result<Norma
         output_decay: None, // Across margin is fixed at deposit — no Dutch decay.
         deadline,
         settlement: SettlementType::OptimisticOracle {
-            challenge_window: Duration::seconds(ACROSS_OO_LIVENESS_SECS),
+            challenge_window: ChronoDuration::seconds(ACROSS_OO_LIVENESS_SECS),
         },
         observed_at,
         winning_filler: None,  // open — not yet filled
@@ -180,15 +186,19 @@ pub fn normalize_deposit(origin_chain: ChainId, log: &ws::WsLog) -> Result<Norma
     })
 }
 
-/// Across live source: subscribes to origin-chain `FundsDeposited` deposits.
+/// Across live source: polls origin-chain `FundsDeposited` deposits.
 pub struct AcrossLive {
     /// Requested origin chains (already parsed/validated by the caller).
     chains: Vec<ChainId>,
+    /// Directory checkpoint files live in (one per chain, restart-safe).
+    checkpoint_dir: PathBuf,
+    /// How often each chain is polled.
+    interval: Duration,
 }
 
 impl AcrossLive {
-    pub fn new(chains: Vec<ChainId>) -> Self {
-        Self { chains }
+    pub fn new(chains: Vec<ChainId>, checkpoint_dir: impl Into<PathBuf>, interval: Duration) -> Self {
+        Self { chains, checkpoint_dir: checkpoint_dir.into(), interval }
     }
 }
 
@@ -204,19 +214,19 @@ impl LiveSource for AcrossLive {
         let open_names: Vec<&str> = open.iter().map(|o| o.chain.name()).collect();
         let idle_names: Vec<&str> = idle.iter().map(|c| c.name()).collect();
         info!(source = "across", open = ?open_names, idle = ?idle_names,
-            "live real-time inventory");
+            "live real-time-ish inventory (poll)");
         for c in &idle {
-            warn!(source = "across", chain = %c, var = %across_ws_var(*c),
-                "no ACROSS_WS endpoint — chain idle (no real-time stream)");
+            warn!(source = "across", chain = %c, var = %across_rpc_var(*c),
+                "no ACROSS_RPC endpoint — chain idle (no poll)");
         }
 
         let (tx, rx) = mpsc::channel(INTENT_BUFFER);
         if open.is_empty() {
-            warn!(source = "across", "no real-time open source — idle");
+            warn!(source = "across", "no real-time-ish open source — idle");
             return (SourceKind::Idle, rx); // tx dropped → receiver closes immediately
         }
         for oc in open {
-            spawn_chain(oc, tx.clone());
+            spawn_chain(oc, "across", self.checkpoint_dir.clone(), self.interval, tx.clone());
         }
         // Drop our own sender so the receiver closes once every chain task ends.
         drop(tx);
@@ -224,26 +234,32 @@ impl LiveSource for AcrossLive {
     }
 }
 
-/// Wire one open chain: a transport task (`ws::stream_logs`) feeding a decode
-/// task that normalizes each log onto the shared intents channel.
-fn spawn_chain(oc: OpenChain, intents: mpsc::Sender<NormalizedIntent>) {
+/// Wire one open chain: a transport task ([`poll::poll_loop`]) feeding a
+/// decode task that normalizes each log onto the shared intents channel. Same
+/// shape for Across and OIF ([`crate::oif::live::spawn_chain`]) — only the
+/// address/topic0/decode differ.
+fn spawn_chain(
+    oc: OpenChain,
+    source_label: &'static str,
+    checkpoint_dir: PathBuf,
+    interval: Duration,
+    intents: mpsc::Sender<NormalizedIntent>,
+) {
     let chain = oc.chain;
-    let cfg = ws::WsConfig {
-        ws_url: oc.ws_url,
+    let cfg = poll::PollConfig {
+        rpc_url: oc.rpc_url,
         address: oc.spoke.to_string(), // EIP-55 0x… address
         topic0: format!("{:#x}", FundsDeposited::SIGNATURE_HASH),
         label: chain.name().to_string(),
+        checkpoint_path: checkpoint_dir
+            .join(format!("checkpoint-{source_label}-{}.json", chain.name())),
+        interval,
     };
 
-    let (log_tx, mut log_rx) = mpsc::channel::<ws::WsLog>(LOG_BUFFER);
+    let (log_tx, mut log_rx) = mpsc::channel::<poll::RawLog>(LOG_BUFFER);
 
-    // Transport: subscribe + stream raw logs (reconnect/backoff inside).
-    tokio::spawn(async move {
-        if let Err(e) = ws::stream_logs(cfg, log_tx).await {
-            // Fatal (eth_subscribe rejected) — loud, not silent.
-            error!(chain = %chain, error = %e, "live WS source stopped (fatal)");
-        }
-    });
+    // Transport: poll + forward raw logs (retry-on-error is inside).
+    tokio::spawn(poll::poll_loop(cfg, log_tx));
 
     // Decode: raw log → NormalizedIntent → shared stream.
     tokio::spawn(async move {
@@ -268,60 +284,61 @@ mod tests {
     /// The SAME committed real Arbitrum deposit (tx `0x7bcd2bf7…`) used by the
     /// LIV-1 topic0 lock — reused here as independent truth for the live
     /// normalize path. Parsed straight from the Etherscan envelope into a
-    /// [`ws::WsLog`] (extra Etherscan fields like `timeStamp` are ignored).
+    /// [`poll::RawLog`] (extra Etherscan fields like `timeStamp` are ignored).
     const REAL_DEPOSIT: &str = include_str!("../across/testdata/fundsdeposited_arb_usdt.json");
 
-    fn real_deposit_log() -> ws::WsLog {
+    fn real_deposit_log() -> poll::RawLog {
         let env: serde_json::Value = serde_json::from_str(REAL_DEPOSIT).unwrap();
         serde_json::from_value(env["result"][0].clone()).unwrap()
     }
 
-    /// The env-var convention is `ACROSS_WS_<UPPER-CHAIN-NAME>` — `doctor`
-    /// (LIV-5) and the adapter must agree on this exact spelling, else a
-    /// configured endpoint would look unset (silent idle).
+    /// The env-var convention is `ACROSS_RPC_<UPPER-CHAIN-NAME>` — `doctor`
+    /// and the adapter must agree on this exact spelling, else a configured
+    /// endpoint would look unset (silent idle).
     #[test]
-    fn ws_var_name_is_across_ws_upper_chain() {
-        assert_eq!(across_ws_var(ChainId::ARBITRUM), "ACROSS_WS_ARBITRUM");
-        assert_eq!(across_ws_var(ChainId::OPTIMISM), "ACROSS_WS_OPTIMISM");
-        assert_eq!(across_ws_var(ChainId::BASE), "ACROSS_WS_BASE");
+    fn rpc_var_name_is_across_rpc_upper_chain() {
+        assert_eq!(across_rpc_var(ChainId::ARBITRUM), "ACROSS_RPC_ARBITRUM");
+        assert_eq!(across_rpc_var(ChainId::OPTIMISM), "ACROSS_RPC_OPTIMISM");
+        assert_eq!(across_rpc_var(ChainId::BASE), "ACROSS_RPC_BASE");
     }
 
     /// `classify` splits open from idle by the injected resolver — open carries
     /// the resolved URL + verified spoke; a missing var (Optimism here) and an
     /// empty-string var (Base) both fall to idle (an empty endpoint is not a
-    /// usable subscription).
+    /// usable poll target).
     #[test]
     fn classify_splits_open_and_idle() {
         let chains = vec![ChainId::ARBITRUM, ChainId::OPTIMISM, ChainId::BASE];
         let (open, idle) = classify(&chains, |var| match var {
-            "ACROSS_WS_ARBITRUM" => Some("wss://arb.example/ws".to_string()),
-            "ACROSS_WS_BASE" => Some("   ".to_string()), // present but blank → idle
-            _ => None,                                    // Optimism unset
+            "ACROSS_RPC_ARBITRUM" => Some("https://arb.example/rpc".to_string()),
+            "ACROSS_RPC_BASE" => Some("   ".to_string()), // present but blank → idle
+            _ => None,                                     // Optimism unset
         });
         let open_chains: Vec<ChainId> = open.iter().map(|o| o.chain).collect();
         assert_eq!(open_chains, vec![ChainId::ARBITRUM]);
-        assert_eq!(open[0].ws_url, "wss://arb.example/ws");
+        assert_eq!(open[0].rpc_url, "https://arb.example/rpc");
         assert_eq!(open[0].spoke, spoke_pool(ChainId::ARBITRUM).unwrap());
         // Both the unset and the blank chain are idle.
         assert_eq!(idle, vec![ChainId::OPTIMISM, ChainId::BASE]);
     }
 
-    /// LIV-3 core: a real deposit log decodes into an **open origin** intent —
-    /// origin = the subscribed chain (Arbitrum), dest = `destinationChainId`
-    /// (Optimism = 10), no realized output / winner yet, and `tx_ref` on the
-    /// **origin** deposit tx (the deposit/fill asymmetry vs the historical
-    /// path). Values are the fixture's independently-decoded ground truth.
+    /// LIV-3 core (now poll-based): a real deposit log decodes into an **open
+    /// origin** intent — origin = the polled chain (Arbitrum), dest =
+    /// `destinationChainId` (Optimism = 10), no realized output / winner yet,
+    /// and `tx_ref` on the **origin** deposit tx (the deposit/fill asymmetry vs
+    /// the historical path). Values are the fixture's independently-decoded
+    /// ground truth.
     #[test]
     fn normalize_real_deposit_is_open_origin_intent() {
         let log = real_deposit_log();
         let intent = normalize_deposit(ChainId::ARBITRUM, &log).unwrap();
 
         assert_eq!(intent.source, Source::Across);
-        assert_eq!(intent.origin_chain, ChainId::ARBITRUM); // the subscribed chain
+        assert_eq!(intent.origin_chain, ChainId::ARBITRUM); // the polled chain
         assert_eq!(intent.dest_chain, ChainId::OPTIMISM); // destinationChainId = 10
         assert_eq!(intent.id.0, "across:arbitrum:optimism:4413465"); // depositId 0x435819
 
-        // Open / real-time invariants.
+        // Open / real-time-ish invariants.
         assert!(intent.realized_output.is_none(), "deposit has no realized output yet");
         assert!(intent.winning_filler.is_none(), "deposit has no winner yet");
         assert!(intent.output_decay.is_none(), "Across has no Dutch decay");
@@ -367,13 +384,14 @@ mod tests {
         assert_eq!(intent.deadline.timestamp(), 0x6a37cb4f);
     }
 
-    /// LIV-6: the exclusivity-**present** branch of `normalize_deposit`. The
-    /// clean real fixture has a zero `exclusiveRelayer`; here we synthesize the
-    /// exclusivity case by setting the two words the fixture left empty —
-    /// `exclusivityDeadline` (data word 6) and `exclusiveRelayer` (word 8),
-    /// with a real Across exclusive-relayer address. A clearly synthetic variant
-    /// of the real log (NOT presented as on-chain), exercising the same branch
-    /// the historical exclusive-fill test covers for the fill side.
+    /// LIV-6 (kept from the WS era): the exclusivity-**present** branch of
+    /// `normalize_deposit`. The clean real fixture has a zero
+    /// `exclusiveRelayer`; here we synthesize the exclusivity case by setting
+    /// the two words the fixture left empty — `exclusivityDeadline` (data word
+    /// 6) and `exclusiveRelayer` (word 8), with a real Across exclusive-relayer
+    /// address. A clearly synthetic variant of the real log (NOT presented as
+    /// on-chain), exercising the same branch the historical exclusive-fill
+    /// test covers for the fill side.
     #[test]
     fn normalize_deposit_exclusivity_branch() {
         let mut log = real_deposit_log();

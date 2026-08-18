@@ -10,8 +10,8 @@
 //! Verified sources (one at a time, each behind its own on-chain verification,
 //! never a horizontal sweep): historical **UniswapX** (no-key REST orders),
 //! historical **Across** (`FilledRelay` logs via the Etherscan V2 multichain
-//! API, key-gated), live **Across** (`FundsDeposited` WS subscription), and
-//! live **OIF** (`Open` WS subscription, same shape).
+//! API, key-gated), live **Across** (`FundsDeposited`, checkpointed `eth_getLogs`
+//! poll), and live **OIF** (`Open`, same poll transport).
 
 pub mod across;
 pub mod live;
@@ -20,7 +20,7 @@ pub mod store;
 pub mod uniswapx;
 
 pub use across::{AcrossIngest, AcrossIngestConfig, ACROSS_CHAINS};
-pub use live::{across_ws_var, AcrossLive, LiveSource, SourceKind};
+pub use live::{across_rpc_var, AcrossLive, LiveSource, SourceKind};
 pub use oif::{input_settler_escrow, OifLive, INPUT_SETTLER_ESCROW, OIF_CHAINS};
 pub use store::JsonlSink;
 pub use uniswapx::{UniswapXIngest, UniswapXIngestConfig, UNISWAPX_CHAINS};
