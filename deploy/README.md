@@ -158,6 +158,16 @@ which just SSHes in and runs the same script (see the justfile).
   at startup and every heartbeat (60s) — correct and restart-safe, but a full
   rescan, not an incrementally-maintained counter. Fine at this project's
   scale; would need revisiting if the decisions log ever got large.
+- **Needs a redeploy to pick up RETAIN-1 (2026-08-18).** Same 15GB-disk VPS,
+  disk side of the POLL-1 fix: `decisions-*.jsonl` grew forever with no
+  cleanup. `solver live --retention-days` (default 9, checked every
+  heartbeat) now deletes whole day-rotated files past the threshold;
+  `checkpoint-*.json` (POLL-1's resume state) is never touched. The default
+  is deliberately 9, not 7 — the dashboard's 7d window needs at least 8
+  calendar days on disk to never get silently truncated (today's partial day
+  + 7 full ones); going lower than 8 logs a loud startup `WARN` instead of
+  quietly under-counting. No new secret/config needed — bundled in the same
+  redeploy as POLL-1 above.
 - **Across-only.** OIF idle, UniswapX is retrospective-poll. Cross-chain Across
   flow is the MVP scope; `/about` says so.
 - **Niche by design.** This is a developer/researcher/grant tool, not a

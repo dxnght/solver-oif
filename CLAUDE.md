@@ -109,8 +109,11 @@ Env — у `.env.example` (скопіюй у `.env`, **`.env` ніколи не 
 
 ## Структура даних і артефактів
 Вхід: `data/<source>/*.jsonl` (append-only — дедуп на load). Звіти: `reports/<run>/`.
-Live: `reports/live/{intents,decisions}-<src>-<day>.jsonl`. JSONL-схема — durable:
-нові поля **додавати**, не перейменовувати мовчки.
+Live: `reports/live/decisions-<src>-<day>.jsonl` (день-ротація) +
+`checkpoint-<src>-<chain>.json` (POLL-1, останній оброблений блок — не ротується,
+не видаляється). JSONL-схема — durable: нові поля **додавати**, не перейменовувати
+мовчки. `decisions-*` самоочищується (`RETAIN-1`, `--retention-days`, дефолт 9д) —
+не покладатись на нескінченну історію на диску.
 
 ## Доки (канон, не сесійні)
 - `solver-engine-spec.md` — канонічна ідея (§0–§10).
