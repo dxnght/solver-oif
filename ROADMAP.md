@@ -234,6 +234,51 @@ correctness. Валюація ноги **не** вгадує scale: збереж
   49.6% exclusivity (175/353 exclusive_to_other) і 0.8% would_fill (3/353)
   зійшлись вручну; жодних `NaN`/незамінених `{{...}}`-плейсхолдерів.
 
+**POLL-1 — Batch-poll live ingest замість WS push. ✅ ЗРОБЛЕНО (2026-08-18).**
+Не нова ширина, а виправлення операційної вартості вже зробленого (B4/OIF-2):
+живий VPS-сервіс (BRESIL-1, `solver-live.service`, 24/7, 3 чейни) генерував
+`eth_subscribe`-нотифікації в темпі реального Across-депозитного трафіку —
+некерований обсяг (~9200 інтентів/добу на самому лише Across), достатній,
+щоб щоночі з'їдати істотну частку безкоштовної Infura-квоти. Причина
+знайдена через живий `/aggregates` дашборда, не здогадка.
+
+Оскільки `would_fill` зважується виключно постфактум (правило #6 — модель,
+не факт до валідації) і система нічого не робить у момент транзакції,
+секундна свіжість push-підписки не давала жодної практичної переваги перед
+контрольованим polling. Новий `crates/ingest/src/live/poll.rs`: `eth_blockNumber`
+(тік) → `eth_getLogs` за `[checkpoint+1, min(tip, checkpoint+2000)]` →
+checkpoint на диску (`reports/live/checkpoint-<source>-<chain>.json`,
+restart-safe, без реплею історії — той самий «тільки що станеться далі», що
+й WS). `--poll-interval-secs` (дефолт 60с, новий прапорець `solver live`) —
+фіксована стеля `2 × чейни × (86400/interval)` запитів на добу, незалежна
+від реального ончейн-трафіку. Кожен RPC-фейл — гучний `WARN` + ретрай на
+наступний тік (нема fatal-шляху, на відміну від WS `eth_subscribe rejected`
+— усі HTTP-помилки тут за визначенням транзієнтні).
+
+`AcrossLive`/`OifLive` тепер резолвлять **той самий** `ACROSS_RPC_<CHAIN>`,
+що вже existed для `eth_feeHistory`-рунги газової драбини (LP-1..6/GAS) —
+не окремий `ACROSS_WS_<CHAIN>`/`OIF_WS_<CHAIN>`: один сконфігурований
+ендпоінт на чейн тепер живить три речі одразу (Across-поллінг, OIF-поллінг,
+живий газ), і сервер, де вже стояв `ACROSS_RPC_*` для газу, **не потребує
+нового секрету** для редеплою. `solver doctor` перероблено відповідно
+(`across_rpc_env`/`oif_rpc_env`, «RPC-SET/RPC-MISSING», «READY on N/M chains
+(poll)») — той самий legibility-контракт (правило #7), нові дані.
+
+Перевірено: 39 нових/оновлених тестів у `solver-ingest` (wire-shape
+`eth_getLogs`/`eth_blockNumber`, `parse_get_logs`/`parse_block_number` на
+**реальних** committed-фікстурах Across/OIF (той самий підхід, що WS-ери
+тести — не тавтологія, правило #3), checkpoint round-trip через диск,
+`next_range`-межі), `solver doctor` тести переписані під новий env-контракт
+— увесь workspace `/verify` зелений. Живий ручний прогін проти реального
+Base RPC (`ACROSS_RPC_BASE` з `.env`): коректний baseline на tip, і на
+другому тіку — реальний Base-депозит знайдено через `eth_getLogs`,
+нормалізовано, прогнано крізь спільний `decide()`
+(`across:base:chain:4663:6024439`, `reason=unsupported_chain`, чесний скіп),
+записано в JSONL; checkpoint коректно просунувся. **Не задеплоєно на VPS** —
+код і `deploy/`-доки готові (`solver-live.service`/`solver.env.example`
+оновлені, старі `*_WS_*`-змінні документовано як більше не читані), рестарт
+сервісу лишається за людиною.
+
 **Тільки після B0–B6 — повертатись до нової ширини** (PATH-JOIN/FEED/OIF/нові чейни).
 
 ## Беклог (заморожено до verified core)

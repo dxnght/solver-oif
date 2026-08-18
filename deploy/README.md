@@ -10,7 +10,7 @@ Debian/Ubuntu box works the same way, with more headroom. Three layers:
 - **BDEPLOY-1** — `update.sh` / `just deploy`: pull → build → verify → restart.
 
 **Security model:** the app binds `127.0.0.1:8088` only — never internet-facing.
-Caddy (ports 80/443) is the sole public surface. Secrets (RPC/WS URLs, Etherscan
+Caddy (ports 80/443) is the sole public surface. Secrets (RPC URLs, Etherscan
 key) live in `/opt/solver/solver.env` (chmod 600) and are read into the process
 env; the dashboard serves only public decision records, never the keys. No auth,
 because the data is public on-chain flow — that is the point.
@@ -137,6 +137,18 @@ which just SSHes in and runs the same script (see the justfile).
 
 ## Known beta limits (honest)
 
+- **Needs a redeploy to pick up POLL-1 (2026-08-18).** The live source was
+  originally a WS `eth_subscribe` push; the 24/7 `solver-live.service` on
+  this VPS running it against real Across traffic on 3 chains was enough to
+  eat a meaningful share of the Infura free daily quota every night — an
+  uncapped cost driven by chain activity, not by anything the service
+  controls. `crates/ingest/src/live/poll.rs` replaces it with checkpointed
+  `eth_getLogs` polling (default every 60s, `--poll-interval-secs`), a fixed
+  request ceiling per chain. Needs `ACROSS_RPC_<CHAIN>` (already in
+  `solver.env` for gas — no new secret), not `ACROSS_WS_<CHAIN>`/
+  `OIF_WS_<CHAIN>` (delete those, no longer read). Verified locally against a
+  real Base RPC endpoint; **not yet redeployed to this VPS** — `git pull &&
+  update.sh` (or `just deploy-remote`) still needed.
 - **`update.sh` doesn't yet install `build-essential`/`clippy`.** First-time
   server setup (§1 above) needs both; a redeploy on an already-provisioned
   box doesn't. Small gap, not yet closed — do §1 once by hand before the

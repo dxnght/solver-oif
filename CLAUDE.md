@@ -31,7 +31,7 @@ Rust workspace, 6 крейтів + live-підсистема + дашборд. �
 | Крейт | Відповідальність |
 |---|---|
 | `types` | `NormalizedIntent`, `Quote`, `AssetAmount`, `ChainId`, `FillPolicy`, `SettlementType`, `TxRef` |
-| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/` — `LiveSource` trait, `ws` transport, shared; `across/`'s and `oif/`'s own live adapters) + `oif/` (`deployments`, `event`, `live`) → нормалізація в один формат |
+| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/` — `LiveSource` trait, `poll` transport (checkpointed `eth_getLogs`), shared; `across/`'s and `oif/`'s own live adapters) + `oif/` (`deployments`, `event`, `live`) → нормалізація в один формат |
 | `pricing` | газ (`gas`/`fee_history_gas`), сорсинг (`odos`), offline |
 | `router` | **серце edge** (`v0`): asset-class routing, decay, confidence, `QuoteOutcome`/`SkipReason`; ціни (`prices`/`live_prices`) |
 | `backtest` | `load` (dedup+hygiene), `metrics` (+ would_fill-калібрування), `report`, `dest_summary` |
@@ -66,7 +66,7 @@ cargo build --workspace && cargo clippy --workspace -- -D warnings && cargo test
 ./target/release/solver ingest uniswapx --days 14
 ./target/release/solver backtest --out-dir reports/<run>
 
-# Live shadow (потрібні ACROSS_WS_* / OIF_WS_*; без них джерело idle — і каже про це):
+# Live shadow (потрібен ACROSS_RPC_*; без нього джерело idle — і каже про це):
 ./target/release/solver live --chains base,arbitrum,optimism --sources across,oif \
     --dashboard-port 8088 --duration 600 --out reports/live
 ```
