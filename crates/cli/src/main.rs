@@ -64,24 +64,34 @@ enum Command {
         #[arg(long)]
         reproducible: bool,
     },
-    /// Phase-1 live shadow: subscribe to real-time intents and log shadow
-    /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` and/or
-    /// `OIF_WS_<CHAIN>` per chain, depending on `--sources`.
+    /// Phase-1 live shadow: poll real-time-ish intents and log shadow
+    /// decisions. Zero transactions. Needs `ACROSS_RPC_<CHAIN>` per chain,
+    /// depending on `--sources` (POLL-1: checkpointed `eth_getLogs`, replacing
+    /// the earlier WS `eth_subscribe` push — see `solver_ingest::live::poll`
+    /// docs for why: push volume is driven by chain activity we don't
+    /// control, poll gives a fixed request ceiling we do).
     Live {
         /// Comma-separated origin chains, e.g. `base,arbitrum,optimism`.
         #[arg(long)]
         chains: String,
-        /// Comma-separated sources: `across` (needs `ACROSS_WS_<CHAIN>`) and/or
-        /// `oif` (needs `OIF_WS_<CHAIN>`, OIF-2). A source with nothing
-        /// configured is idle, not an error.
+        /// Comma-separated sources: `across` and/or `oif` (OIF-2) — both need
+        /// `ACROSS_RPC_<CHAIN>` (chain-generic, shared with the gas ladder).
+        /// A source with nothing configured is idle, not an error.
         #[arg(long, default_value = "across")]
         sources: String,
         /// Stop after N seconds (omit to run until interrupted).
         #[arg(long)]
         duration: Option<u64>,
-        /// Output directory for the decisions JSONL.
+        /// Output directory for the decisions JSONL and per-chain poll
+        /// checkpoints.
         #[arg(long, default_value = live::LIVE_OUT_DIR)]
         out: String,
+        /// How often (seconds) each chain is polled for new logs. Lower = less
+        /// latency, more RPC requests; higher = the reverse. The request
+        /// ceiling per chain is exactly `2 × 86400/interval` per day
+        /// (`eth_blockNumber` + `eth_getLogs`), regardless of chain activity.
+        #[arg(long, default_value_t = solver_ingest::live::poll::DEFAULT_POLL_INTERVAL.as_secs())]
+        poll_interval_secs: u64,
         /// Serve a live observability dashboard on `127.0.0.1:<port>` (SSE of
         /// the same shadow decisions). Omit to keep the plain B4 behavior.
         #[arg(long)]
@@ -169,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
             sources,
             duration,
             out,
+            poll_interval_secs,
             dashboard_port,
             live_prices,
             static_gas,
@@ -185,7 +196,15 @@ async fn main() -> anyhow::Result<()> {
             // --reproducible forces static.
             let (prices, gas) =
                 build_pricing(live_prices && !reproducible, !static_gas && !reproducible);
-            live::run(chains, sources, duration, &out, dashboard_port, prices, gas).await
+            let config = live::LiveConfig {
+                chains,
+                sources,
+                duration,
+                out_dir: out,
+                poll_interval: std::time::Duration::from_secs(poll_interval_secs),
+                dashboard_port,
+            };
+            live::run(config, prices, gas).await
         }
         Command::Doctor { suggest } => {
             run_doctor(suggest).await;
@@ -241,9 +260,10 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
         }
         "oif" => anyhow::bail!(
             "source 'oif': no historical ingest yet — 'ingest' scans backfill data, and OIF-2 \
-             only built the WS live adapter (`solver live --sources oif`), not a getLogs \
-             backfill. The InputSettlerEscrow address itself is verified (OIF-1); this is a \
-             missing feature, not an unverified address."
+             only built the live poll adapter (`solver live --sources oif`), which streams new \
+             orders forward from the chain tip, not a historical backfill over a date range. \
+             The InputSettlerEscrow address itself is verified (OIF-1); this is a missing \
+             feature, not an unverified address."
         ),
         other => anyhow::bail!(
             "unknown source '{other}'. Known sources: 'uniswapx' (no key), \

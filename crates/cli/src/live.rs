@@ -1,6 +1,6 @@
 //! `solver live` — Phase-1 live shadow loop (zero transactions).
 //!
-//! Subscribes to real-time intents via one or more [`LiveSource`]s (Across
+//! Polls real-time-ish intents via one or more [`LiveSource`]s (Across
 //! deposits, OIF `Open` orders — OIF-2), merges them into one stream, runs
 //! the **same** shared decision as the backtest ([`RouterV0::decide`] →
 //! `would_fill` + reason, the single [`FillPolicy`]), and appends one
@@ -11,11 +11,11 @@
 //!
 //! Legibility (CLAUDE.md rule #7): each source announces its own open/idle
 //! chain inventory at startup; a periodic heartbeat reports throughput; a
-//! source with nothing configured (no `ACROSS_WS_<CHAIN>`/`OIF_WS_<CHAIN>`)
-//! is a loud per-source `WARN`, not silence; if *every* requested source ends
-//! up idle, the whole run returns loudly rather than sitting open with
-//! nothing to show. Prices/gas are static here (live feeds are a later
-//! bucket) — same as the backtest, so the decision is comparable.
+//! source with nothing configured (no `ACROSS_RPC_<CHAIN>`) is a loud
+//! per-source `WARN`, not silence; if *every* requested source ends up idle,
+//! the whole run returns loudly rather than sitting open with nothing to
+//! show. Prices/gas are static here (live feeds are a later bucket) — same as
+//! the backtest, so the decision is comparable.
 
 use std::path::Path;
 use std::time::Duration as StdDuration;
@@ -96,26 +96,36 @@ impl DecisionRecord {
     }
 }
 
-/// Run the live shadow loop. `sources` selects which live sources to subscribe
-/// to — `across` and `oif` are both wired (OIF-2); an unrecognized name is a
-/// loud `WARN` + ignore. `duration` bounds the run in seconds (None = until
-/// interrupted). Decisions land under `out_dir`.
-pub async fn run(
-    chains: Vec<ChainId>,
-    sources: Vec<String>,
-    duration: Option<u64>,
-    out_dir: &str,
-    dashboard_port: Option<u16>,
-    prices: PriceSource,
-    gas: GasSource,
-) -> Result<()> {
+/// Everything about the run except pricing (kept separate — `prices`/`gas`
+/// are already their own resolved sources by the time the CLI calls `run`).
+/// Bundled into one struct rather than passed positionally so `run` stays
+/// under clippy's argument-count lint without an `#[allow]`.
+pub struct LiveConfig {
+    pub chains: Vec<ChainId>,
+    /// Which live sources to poll — `across` and `oif` are both wired
+    /// (OIF-2); an unrecognized name is a loud `WARN` + ignore.
+    pub sources: Vec<String>,
+    /// Bounds the run in seconds (`None` = until interrupted).
+    pub duration: Option<u64>,
+    /// Decisions and per-chain poll checkpoints land under here.
+    pub out_dir: String,
+    /// How often each chain is polled (POLL-1 — checkpointed `eth_getLogs`,
+    /// not a WS push).
+    pub poll_interval: StdDuration,
+    pub dashboard_port: Option<u16>,
+}
+
+/// Run the live shadow loop — see [`LiveConfig`] for the run parameters.
+pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Result<()> {
+    let LiveConfig { chains, sources, duration, out_dir, poll_interval, dashboard_port } = config;
+
     // Source selection: one LiveSource per recognized name. An unknown name
     // is announced, not silent (rule #7).
     let mut wanted: Vec<Box<dyn LiveSource>> = Vec::new();
     for s in &sources {
         match s.as_str() {
-            "across" => wanted.push(Box::new(AcrossLive::new(chains.clone()))),
-            "oif" => wanted.push(Box::new(OifLive::new(chains.clone()))),
+            "across" => wanted.push(Box::new(AcrossLive::new(chains.clone(), &out_dir, poll_interval))),
+            "oif" => wanted.push(Box::new(OifLive::new(chains.clone(), &out_dir, poll_interval))),
             other => warn!(source = %other, "unknown live source — ignored"),
         }
     }
@@ -147,14 +157,14 @@ pub async fn run(
 
     if open_names.is_empty() {
         warn!(
-            "no real-time open source — idle (set ACROSS_WS_<CHAIN>/OIF_WS_<CHAIN>, \
+            "no real-time-ish open source — idle (set ACROSS_RPC_<CHAIN>, \
              or run `solver doctor`)"
         );
         return Ok(());
     }
     let source_label = open_names.join("+");
 
-    let path = Path::new(out_dir)
+    let path = Path::new(&out_dir)
         .join(format!("decisions-{source_label}-{}.jsonl", Utc::now().format("%Y%m%d")));
     info!(sources = %source_label, out = %path.display(), duration_s = ?duration,
         prices = prices.label(), gas = gas.label(),
@@ -170,7 +180,7 @@ pub async fn run(
             // BAGG-1: seed the persisted 24h/7d aggregates from disk BEFORE the
             // loop starts, so a restart's first page load already reflects
             // history instead of resetting to zero while new decisions trickle in.
-            let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
+            let agg = crate::aggregates::compute(Path::new(&out_dir), Utc::now());
             handle.set_aggregates(agg);
             Some(handle)
         }
@@ -209,7 +219,7 @@ pub async fn run(
                 // premature incremental-eviction machinery) and keeps `/aggregates`
                 // from drifting stale for long between restarts.
                 if let Some(d) = &dashboard {
-                    let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
+                    let agg = crate::aggregates::compute(Path::new(&out_dir), Utc::now());
                     d.set_aggregates(agg);
                 }
             }
