@@ -47,7 +47,8 @@ cargo build --workspace
 ./target/release/solver backtest --out-dir reports/run1
 ```
 
-Live shadow (needs `ACROSS_WS_<CHAIN>` websocket RPC endpoints; without them the
+Live shadow (needs `ACROSS_RPC_<CHAIN>` HTTP RPC endpoints — polled via
+checkpointed `eth_getLogs`, not a websocket subscription; without them the
 source idles and says so):
 
 ```bash
@@ -63,6 +64,13 @@ Live dashboard without duration:
 ```bash
 source .env #must! otherwise - warnings.
 ./target/release/solver live --chains base,arbitrum,optimism --sources across --live-prices --dashboard-port 8088
+```
+
+Live shadow both across & oif (both share `ACROSS_RPC_<CHAIN>`):
+
+```bash
+./target/release/solver live --chains base,arbitrum,optimism --sources across,oif \
+--dashboard-port 8088 --duration 600 --out reports/live
 ```
 
 ## Architecture

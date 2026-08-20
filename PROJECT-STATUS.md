@@ -54,13 +54,27 @@ static-ціни (та ще й тавтологічної: модель і realiz
 де $1-peg реальний. Результат тверезий (precision ≈43%), що й підтверджує edge≈0.
 
 ## Що під підозрою / зламано (з аудиту)
-- 🔴 **OIF InputSettler-адреса хардкоднута й НЕВЕРИФІКОВАНА** (`live/oif/deployments.rs`):
-  коментар посилається на `DEPLOYMENTS.md`, якого в репо OIF немає; «тест» —
-  тавтологія. **Не довіряти, поки не звірено on-chain.** Тримати OIF idle.
+- ✅ **OIF InputSettler-адреса** — закрито в ROADMAP OIF-1 (2026-08-06):
+  на момент аудиту (попередня реалізація) коментар посилався на
+  `DEPLOYMENTS.md`, якого нібито не було в OIF-репо, а «тест» був тавтологією.
+  Нова `crates/ingest/src/oif/deployments.rs` звірила адресу
+  (`0x1CC9260E285C2C8AC8D2E7102F3978056Ec1d0a8`, `InputSettlerEscrow`) трьома
+  незалежними джерелами (офіційний `DEPLOYMENTS.md`, `eth_getCode` на 4 чейнах,
+  Sourcify) — деталі в ROADMAP. **OIF-2 (живий адаптер) теж закрито
+  (2026-08-06):** `solver live --sources oif` (або `across,oif` разом)
+  підписується на `Open`, чотири незалежні звірки topic0/decode на реальному
+  Base-логу — деталі в ROADMAP. `oif` лишається `Idle`, тільки коли нема
+  `ACROSS_RPC_<CHAIN>` (POLL-1; було `OIF_WS_<CHAIN>` до 2026-08-18), той
+  самий legibility-контракт, що Across.
 - ✅ **Across-події (історичні) на поточному поколінні** — закрито в B2: ingest читає
-  `FilledRelay` (bytes32) з канонічного ABI. ✅ **live-WS-адаптер — закрито в B4**
-  (`eth_subscribe` на `FundsDeposited`-депозити). Лишається: JOIN depozit↔fill
-  (PATH, окремий bucket).
+  `FilledRelay` (bytes32) з канонічного ABI. ✅ **live-адаптер — закрито в B4**
+  (`eth_subscribe` на `FundsDeposited`-депозити), **потім переведено на
+  checkpointed `eth_getLogs`-поллінг у POLL-1 (2026-08-18)** — живий WS-push
+  на VPS-сервісі (BRESIL-1) з'їдав істотну частку денної Infura-квоти щоночі
+  (об'єм диктував реальний ончейн-трафік, некерований); поллінг дає
+  фіксовану стелю запитів на чейн (`--poll-interval-secs`, дефолт 60с),
+  незалежну від активності мережі — правильний trade для системи, що зважує
+  постфактум. Лишається: JOIN depozit↔fill (PATH, окремий bucket).
 - 🟡 **Дрейф ширини**: додано FEED/PATH/OIF замість консолідації (doctor/B2). Заморозити.
 - **Компіляція не підтверджена незалежним аудитом** (потрібні build/test-логи).
 
@@ -71,9 +85,10 @@ static-ціни (та ще й тавтологічної: модель і realiz
    (`dest_summary` — окремо, за потреби.)
 3. ✅ **B2 — Across historical ingest + Etherscan-V2 проба в `doctor`**: поточне покоління
    `FilledRelay`, калібрування побігло крос-чейн — **зроблено** (AX-1..7).
-4. ✅ **B4 — live Across shadow**: WS `eth_subscribe` на `FundsDeposited` (origin-депозити),
+4. ✅ **B4 — live Across shadow**: (спочатку WS `eth_subscribe`, з POLL-1 —
+   checkpointed `eth_getLogs`-поллінг) на `FundsDeposited` (origin-депозити),
    спільний `decide()` (один `FillPolicy` у live і backtest), decisions JSONL із verify_url,
-   нуль транзакцій; `doctor` показує WS-готовність — **зроблено** (LIV-1..6).
+   нуль транзакцій; `doctor` показує per-chain готовність — **зроблено** (LIV-1..6, POLL-1).
 5. ✅ **B3 — live gas/prices**: CoinGecko-ціни за контракт-адресою (long-tail) +
    `eth_feeHistory`-газ (`ACROSS_RPC_<CHAIN>`), за прапорцем `--live-prices`/`--live-gas`,
    fallback static, дефолт off (детермінізм CI), `--reproducible` перекриває — **зроблено**
@@ -85,7 +100,9 @@ static-ціни (та ще й тавтологічної: модель і realiz
    (broadcast + replay-буфер) у вбудований vanilla-JS дашборд; наратив — exclusivity-capture
    і склад потоку (маршрути/dest-чейни/reason/feed із verify-лінками), не would_fill;
    без прапорця B4 незмінна — **зроблено** (DASH-1..4). Реалізує application-ідею #1.
-   Ще не прогнано проти живого WS-фіда (`ACROSS_WS_<CHAIN>`).
+   Живий на VPS з реальним потоком (BETA-1), але дашборд+POLL-1 разом
+   (`--dashboard-port` + новий поллінг-транспорт) ще не прогнано наживо одним
+   ручним запуском — лише окремо (POLL-1 смоук-тест без дашборда).
 7. ✅ **B6 — розширення price-feed coverage** (вузький, observability-only): CoinGecko
    platform-мапа +bsc/world-chain/ink (platform-id звірено з живим `/asset_platforms`;
    `ChainId::BSC`=56 додано), новий additive skip-reason `unsupported_chain` — відсутню ціну
@@ -113,8 +130,42 @@ static-ціни (та ще й тавтологічної: модель і realiz
     hardened), `BFRAME-1` (`GET /about` + `gas_source` завжди видимий інлайн-тег, не лише
     hover), `BDEPLOY-1` (`deploy/update.sh` + `just deploy-remote`; виправлено нестиковку
     nested-sudo в чернетці й дрейф назви репо `solver-engine`→`solver-oif`) — **зроблено**.
-    Реальний прогін на VPS (Hetzner) — за людиною, не агентом.
-11. Тільки тоді — нова ширина (PATH-JOIN, FEED, OIF після on-chain-підтвердження адреси).
+    **Реальний прогін виконано 2026-08-05** на VPS Zomro (1 vCPU/2.5GB/15GB, Ubuntu 24.04):
+    `https://solver.45-131-182-254.sslip.io/` — `/healthz`/`/about`/`/aggregates` звірено
+    ззовні, живий Across-потік дав перший реальний `reason=fill` (не лише в бектесті).
+    Прогін виявив і виправив реальний баг деплою (Caddy `output file` → `permission denied`
+    на reload, тепер `output stdout`) — деталі в `ROADMAP.md` BDEPLOY-1.
+11. ✅ **BETA-2 — поліш** (BPOLISH-1 запарковано як ідея, BPOLISH-2 свідомо
+    відкритий/незакритий — рішення Власника, BPOLISH-3 зроблено), **OIF-1 —
+    адреса `InputSettlerEscrow` підтверджена on-chain** (три незалежні
+    джерела), і **OIF-2 — живий `Open`-адаптер** (`solver live --sources
+    oif`, той самий `LiveSource`-транспорт, що Across; чотири незалежні
+    topic0/decode-звірки на реальному Base-логу) — деталі в ROADMAP.
+12. ✅ **POLL-1 — checkpointed `eth_getLogs`-поллінг замість WS-push**
+    (2026-08-18): живий VPS-сервіс (BRESIL-1, 24/7, 3 чейни) генерував
+    ~9200 WS-нотифікацій/добу лише з Across-депозитів — некерований обсяг,
+    достатній щоб щоночі з'їдати істотну частку безкоштовної Infura-квоти.
+    Новий `crates/ingest/src/live/poll.rs`: `eth_blockNumber` + `eth_getLogs`
+    по чейну, checkpoint на диску (restart-safe, без реплею історії — той
+    самий «тільки що станеться далі», що й WS), `--poll-interval-secs`
+    (дефолт 60с) — фіксована стеля запитів на чейн, незалежна від реального
+    трафіку. `ACROSS_WS_<CHAIN>`/`OIF_WS_<CHAIN>` більше не читаються — обидва
+    live-джерела й газова `eth_feeHistory`-рунга тепер діляться одним
+    `ACROSS_RPC_<CHAIN>` (уже сконфігурованим на VPS для газу — деплой не
+    потребує нового секрету). Перевірено наживо проти реального Base RPC:
+    знайдено й нормалізовано реальний депозит через новий транспорт,
+    checkpoint коректно просунувся. **Ще не задеплоєно на VPS** — код+доки
+    готові, рестарт сервісу лишається за людиною.
+13. ✅ **RETAIN-1 — автоматична ротація `decisions-*.jsonl`** (2026-08-18):
+    дзеркальний фікс до POLL-1, тільки для диска, не RPC — той самий
+    маленький VPS без чистки ріс би нескінченно. `solver live
+    --retention-days` (дефолт 9, `0`=назавжди) видаляє цілі день-ротовані
+    файли на кожному heartbeat; `checkpoint-*.json` ніколи не чіпається.
+    Поріг узгоджено з дашбордовим 7d-вікном (мінімум 8 днів, щоб воно ніколи
+    не обрізалось мовчки) — нижче нього гучний `WARN` на старті. Живий
+    ручний прогін підтвердив: попередження, видалення застарілого файлу на
+    першому heartbeat, checkpoint неторканий — деталі в ROADMAP.
+14. Нова ширина (PATH-JOIN, FEED, нові чейни, OIF historical/poll-ingest).
 
 ## Чого НЕ робити (застереження)
 - Не вигадувати адреси/ABI/факти; неверифіковане → `None` + `PENDING`.

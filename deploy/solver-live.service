@@ -6,10 +6,20 @@
 #   sudo systemctl enable --now solver-live
 #   journalctl -u solver-live -f        # follow logs
 #
-# One process does both jobs: the live loop (subscribes to Across deposits,
-# quotes each, appends decisions JSONL) AND the dashboard on 127.0.0.1:8088.
-# No --duration, so it runs until stopped; Restart=on-failure covers crashes;
-# the WS layer already reconnects across transient node drops with backoff.
+# One process does both jobs: the live loop (polls Across deposits via
+# checkpointed eth_getLogs, quotes each, appends decisions JSONL) AND the
+# dashboard on 127.0.0.1:8088. No --duration, so it runs until stopped;
+# Restart=on-failure covers crashes; RPC failures inside the poll loop are
+# retried on the next tick (no reconnect logic needed — see
+# solver_ingest::live::poll docs).
+#
+# POLL-1: this used to be a WS eth_subscribe push, which billed one RPC
+# request per on-chain deposit — uncapped, driven by real Across traffic, and
+# enough on its own to eat a meaningful share of a free Infura daily quota
+# every night. Polling (default: every 60s, --poll-interval-secs) gives a
+# fixed request ceiling per chain instead, independent of chain activity —
+# the honest trade for a shadow-only service that only ever measures
+# post-hoc. Needs ACROSS_RPC_<CHAIN>, not ACROSS_WS_<CHAIN> (see solver.env).
 
 [Unit]
 Description=Solver Engine — live intent-flow shadow + dashboard (zero transactions)
@@ -23,13 +33,15 @@ User=solver
 Group=solver
 WorkingDirectory=/opt/solver
 
-# Secrets (RPC/WS URLs, ETHERSCAN_API_KEY) live here, server-side only. They are
+# Secrets (RPC URLs, ETHERSCAN_API_KEY) live here, server-side only. They are
 # read into the process env and NEVER served by the dashboard (which emits only
 # public decision records). chmod 600, owned by the solver user.
 EnvironmentFile=/opt/solver/solver.env
 
-# Unbounded live run. Across is the only wired real-time source; add chains as
-# their ACROSS_WS_<CHAIN> are set. Writes to reports/live/*.jsonl.
+# Unbounded live run. Across is the only wired real-time-ish source; add
+# chains as their ACROSS_RPC_<CHAIN> are set. Writes to reports/live/*.jsonl
+# (decisions) and reports/live/checkpoint-*.json (per-chain poll progress —
+# restart-safe, resumes without re-scanning or silently skipping a gap).
 ExecStart=/opt/solver/bin/solver live \
     --chains base,arbitrum,optimism \
     --sources across \
@@ -49,7 +61,7 @@ ProtectHome=true
 PrivateTmp=true
 # The only writable paths: where it appends data and reports.
 ReadWritePaths=/opt/solver/reports /opt/solver/data
-# It only needs loopback + outbound (WS/RPC/HTTP); no listening on public ifaces.
+# It only needs loopback + outbound (RPC/HTTP); no listening on public ifaces.
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

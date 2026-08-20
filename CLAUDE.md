@@ -31,11 +31,11 @@ Rust workspace, 6 крейтів + live-підсистема + дашборд. �
 | Крейт | Відповідальність |
 |---|---|
 | `types` | `NormalizedIntent`, `Quote`, `AssetAmount`, `ChainId`, `FillPolicy`, `SettlementType`, `TxRef` |
-| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/<source>/`, `ws`, `stream`, `heartbeat`) → нормалізація в один формат |
+| `ingest` | historical (`across/`, `uniswapx/`) + live (`live/` — `LiveSource` trait, `poll` transport (checkpointed `eth_getLogs`), shared; `across/`'s and `oif/`'s own live adapters) + `oif/` (`deployments`, `event`, `live`) → нормалізація в один формат |
 | `pricing` | газ (`gas`/`fee_history_gas`), сорсинг (`odos`), offline |
 | `router` | **серце edge** (`v0`): asset-class routing, decay, confidence, `QuoteOutcome`/`SkipReason`; ціни (`prices`/`live_prices`) |
 | `backtest` | `load` (dedup+hygiene), `metrics` (+ would_fill-калібрування), `report`, `dest_summary` |
-| `cli` | бінар `solver`: модулі `main`, `live`, `dashboard` (+ `dashboard.html`, `about.html`), `aggregates`, `doctor`. Сабкоманди: `ingest`, `backtest`, `live`, `doctor` |
+| `cli` | бінар `solver`: модулі `main`, `live`, `dashboard` (+ `dashboard.html`, `about.html`, `digest.html`), `aggregates`, `doctor`. Сабкоманди: `ingest`, `backtest`, `live`, `doctor` |
 
 Потік: discovery → eligibility → router(quote) → **FillPolicy** (bid-рішення) →
 [Фаза 1: shadow-лог] / [Фаза 2: executor — припарковано] → settlement-watcher.
@@ -66,8 +66,8 @@ cargo build --workspace && cargo clippy --workspace -- -D warnings && cargo test
 ./target/release/solver ingest uniswapx --days 14
 ./target/release/solver backtest --out-dir reports/<run>
 
-# Live shadow (потрібні ACROSS_WS_* / OIF_WS_*; без них джерело idle — і каже про це):
-./target/release/solver live --chains base,arbitrum,optimism --sources across \
+# Live shadow (потрібен ACROSS_RPC_*; без нього джерело idle — і каже про це):
+./target/release/solver live --chains base,arbitrum,optimism --sources across,oif \
     --dashboard-port 8088 --duration 600 --out reports/live
 ```
 
@@ -109,8 +109,11 @@ Env — у `.env.example` (скопіюй у `.env`, **`.env` ніколи не 
 
 ## Структура даних і артефактів
 Вхід: `data/<source>/*.jsonl` (append-only — дедуп на load). Звіти: `reports/<run>/`.
-Live: `reports/live/{intents,decisions}-<src>-<day>.jsonl`. JSONL-схема — durable:
-нові поля **додавати**, не перейменовувати мовчки.
+Live: `reports/live/decisions-<src>-<day>.jsonl` (день-ротація) +
+`checkpoint-<src>-<chain>.json` (POLL-1, останній оброблений блок — не ротується,
+не видаляється). JSONL-схема — durable: нові поля **додавати**, не перейменовувати
+мовчки. `decisions-*` самоочищується (`RETAIN-1`, `--retention-days`, дефолт 9д) —
+не покладатись на нескінченну історію на диску.
 
 ## Доки (канон, не сесійні)
 - `solver-engine-spec.md` — канонічна ідея (§0–§10).

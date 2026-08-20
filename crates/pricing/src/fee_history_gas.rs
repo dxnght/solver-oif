@@ -6,9 +6,10 @@
 //! via `eth_feeHistory` over an HTTP RPC (`ACROSS_RPC_<CHAIN>`) and prices the
 //! same typical fill (`gas_used × gas_price`) at the live price.
 //!
-//! HTTP, not WS: `eth_feeHistory` is a request/response call, not a
-//! subscription, so it uses a separate `ACROSS_RPC_<CHAIN>` endpoint (the
-//! `ACROSS_WS_<CHAIN>` ones are for log subscriptions).
+//! `ACROSS_RPC_<CHAIN>` is chain-generic, not gas-specific: the live Across
+//! and OIF poll sources (POLL-1, `solver_ingest::live::poll`) resolve the
+//! same var for their checkpointed `eth_getLogs`/`eth_blockNumber` calls —
+//! one configured endpoint per chain feeds gas and both live sources.
 //!
 //! Honesty (CLAUDE.md #2 / #7): a chain with **no** RPC configured, or any RPC
 //! error, falls back to [`StaticGasModel`] with a `warn!` — never a fabricated
@@ -156,8 +157,9 @@ impl GasModel for FeeHistoryGasModel {
     }
 }
 
-/// `ACROSS_RPC_<CHAIN>` env var name for `chain` (e.g. `ACROSS_RPC_BASE`),
-/// matching the `ACROSS_WS_<CHAIN>` convention (`chain.name()` upper-cased).
+/// `ACROSS_RPC_<CHAIN>` env var name for `chain` (e.g. `ACROSS_RPC_BASE`,
+/// `chain.name()` upper-cased) — the same spelling
+/// `solver_ingest::live::across_rpc_var` uses for the live poll sources.
 pub fn across_rpc_var(chain: ChainId) -> String {
     format!("ACROSS_RPC_{}", chain.name().to_uppercase())
 }

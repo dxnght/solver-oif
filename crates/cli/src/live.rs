@@ -1,15 +1,20 @@
 //! `solver live` — Phase-1 live shadow loop (zero transactions).
 //!
-//! Subscribes to real-time intents via a [`LiveSource`] (Across deposits today),
-//! runs the **same** shared decision as the backtest ([`RouterV0::decide`] →
+//! Polls real-time-ish intents via one or more [`LiveSource`]s (Across
+//! deposits, OIF `Open` orders — OIF-2), merges them into one stream, runs
+//! the **same** shared decision as the backtest ([`RouterV0::decide`] →
 //! `would_fill` + reason, the single [`FillPolicy`]), and appends one
-//! [`DecisionRecord`] per intent to `reports/live/decisions-<src>-<day>.jsonl`.
-//! No bids, no fills — we only *measure* what we would have decided.
+//! [`DecisionRecord`] per intent to `reports/live/decisions-<srcs>-<day>.jsonl`
+//! (`<srcs>` names every source that ended up genuinely open, e.g.
+//! `across+oif`). No bids, no fills — we only *measure* what we would have
+//! decided.
 //!
-//! Legibility (CLAUDE.md rule #7): the source announces its open/idle chain
-//! inventory at startup; a periodic heartbeat reports throughput; an idle source
-//! (no `ACROSS_WS_<CHAIN>` configured) returns loudly instead of hanging in
-//! silence. Prices/gas are static here (live feeds are a later bucket) — same as
+//! Legibility (CLAUDE.md rule #7): each source announces its own open/idle
+//! chain inventory at startup; a periodic heartbeat reports throughput; a
+//! source with nothing configured (no `ACROSS_RPC_<CHAIN>`) is a loud
+//! per-source `WARN`, not silence; if *every* requested source ends up idle,
+//! the whole run returns loudly rather than sitting open with nothing to
+//! show. Prices/gas are static here (live feeds are a later bucket) — same as
 //! the backtest, so the decision is comparable.
 
 use std::path::Path;
@@ -18,10 +23,11 @@ use std::time::Duration as StdDuration;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use solver_ingest::{AcrossLive, JsonlSink, LiveSource, SourceKind};
+use solver_ingest::{AcrossLive, JsonlSink, LiveSource, OifLive, SourceKind};
 use solver_pricing::GasSource;
 use solver_router::{Decision, PriceSource, RouterV0};
 use solver_types::{ChainId, FillPolicy, NormalizedIntent};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// Default output directory for live artifacts.
@@ -29,6 +35,13 @@ pub const LIVE_OUT_DIR: &str = "reports/live";
 
 /// How often to emit a throughput heartbeat.
 const HEARTBEAT_EVERY: StdDuration = StdDuration::from_secs(60);
+
+/// Depth of the channel every per-source receiver is forwarded into. Each
+/// `LiveSource` already buffers internally at a similar size (see
+/// `solver_ingest::live`/`oif::live`); this only needs to absorb the brief
+/// window between a source's own channel yielding an intent and this loop's
+/// `select!` picking it up.
+const MERGED_BUFFER: usize = 256;
 
 /// One shadow decision, appended to `decisions-<src>-<day>.jsonl`.
 ///
@@ -83,52 +96,97 @@ impl DecisionRecord {
     }
 }
 
-/// Run the live shadow loop. `sources` selects which live sources to subscribe
-/// to (only `across` is wired; `oif` stays idle/unverified). `duration` bounds
-/// the run in seconds (None = until interrupted). Decisions land under `out_dir`.
-pub async fn run(
-    chains: Vec<ChainId>,
-    sources: Vec<String>,
-    duration: Option<u64>,
-    out_dir: &str,
-    dashboard_port: Option<u16>,
-    prices: PriceSource,
-    gas: GasSource,
-) -> Result<()> {
-    // Source selection. Only Across is a real-time source; OIF is unverified
-    // (rule #2) and anything else is unknown — both are announced, not silent.
-    let mut want_across = false;
+/// Everything about the run except pricing (kept separate — `prices`/`gas`
+/// are already their own resolved sources by the time the CLI calls `run`).
+/// Bundled into one struct rather than passed positionally so `run` stays
+/// under clippy's argument-count lint without an `#[allow]`.
+pub struct LiveConfig {
+    pub chains: Vec<ChainId>,
+    /// Which live sources to poll — `across` and `oif` are both wired
+    /// (OIF-2); an unrecognized name is a loud `WARN` + ignore.
+    pub sources: Vec<String>,
+    /// Bounds the run in seconds (`None` = until interrupted).
+    pub duration: Option<u64>,
+    /// Decisions and per-chain poll checkpoints land under here.
+    pub out_dir: String,
+    /// How often each chain is polled (POLL-1 — checkpointed `eth_getLogs`,
+    /// not a WS push).
+    pub poll_interval: StdDuration,
+    /// Delete `decisions-*.jsonl` older than this many calendar days, checked
+    /// every heartbeat (`crate::retention`). `0` = keep forever.
+    pub retention_days: i64,
+    pub dashboard_port: Option<u16>,
+}
+
+/// Run the live shadow loop — see [`LiveConfig`] for the run parameters.
+pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Result<()> {
+    let LiveConfig {
+        chains,
+        sources,
+        duration,
+        out_dir,
+        poll_interval,
+        retention_days,
+        dashboard_port,
+    } = config;
+    if retention_days > 0 && retention_days < crate::retention::MIN_SAFE_RETENTION_DAYS {
+        warn!(
+            retention_days,
+            min_safe = crate::retention::MIN_SAFE_RETENTION_DAYS,
+            "retention_days is below the safe floor — the dashboard's 7d aggregate \
+             window may be truncated (some records up to 7 days old could already \
+             be pruned before the window reads them)"
+        );
+    }
+
+    // Source selection: one LiveSource per recognized name. An unknown name
+    // is announced, not silent (rule #7).
+    let mut wanted: Vec<Box<dyn LiveSource>> = Vec::new();
     for s in &sources {
         match s.as_str() {
-            "across" => want_across = true,
-            "oif" => warn!(
-                source = "oif",
-                "IDLE — settler address UNVERIFIED (rule #2); not subscribing"
-            ),
+            "across" => wanted.push(Box::new(AcrossLive::new(chains.clone(), &out_dir, poll_interval))),
+            "oif" => wanted.push(Box::new(OifLive::new(chains.clone(), &out_dir, poll_interval))),
             other => warn!(source = %other, "unknown live source — ignored"),
         }
     }
-    if !want_across {
-        warn!("no real-time open source requested — idle (only 'across' is wired)");
+    if wanted.is_empty() {
+        warn!("no real-time source requested — idle (known sources: 'across', 'oif')");
         return Ok(());
     }
 
-    let source = AcrossLive::new(chains);
-    let (kind, mut rx) = source.spawn(); // logs the open=[…]/idle=[…] inventory
-    if kind == SourceKind::Idle {
+    // Spawn every requested source (each logs its own open=[…]/idle=[…] chain
+    // inventory) and forward all of them into one merged stream — the rest of
+    // this loop is source-agnostic, exactly like a single-source run.
+    let (merged_tx, mut rx) = mpsc::channel::<NormalizedIntent>(MERGED_BUFFER);
+    let mut open_names: Vec<&'static str> = Vec::new();
+    for source in &wanted {
+        let (kind, mut src_rx) = source.spawn();
+        if kind == SourceKind::RealtimeOpen {
+            open_names.push(source.name());
+        }
+        let tx = merged_tx.clone();
+        tokio::spawn(async move {
+            while let Some(intent) = src_rx.recv().await {
+                if tx.send(intent).await.is_err() {
+                    break; // merged consumer gone — stop forwarding
+                }
+            }
+        });
+    }
+    drop(merged_tx); // rx closes once every forwarder above has ended
+
+    if open_names.is_empty() {
         warn!(
-            source = source.name(),
-            "no real-time open source — idle (set ACROSS_WS_<CHAIN> to subscribe)"
+            "no real-time-ish open source — idle (set ACROSS_RPC_<CHAIN>, \
+             or run `solver doctor`)"
         );
         return Ok(());
     }
+    let source_label = open_names.join("+");
 
-    let path = Path::new(out_dir).join(format!(
-        "decisions-{}-{}.jsonl",
-        source.name(),
-        Utc::now().format("%Y%m%d")
-    ));
-    info!(source = source.name(), out = %path.display(), duration_s = ?duration,
+    let path = Path::new(&out_dir)
+        .join(format!("decisions-{source_label}-{}.jsonl", Utc::now().format("%Y%m%d")));
+    info!(sources = %source_label, out = %path.display(), duration_s = ?duration,
         prices = prices.label(), gas = gas.label(),
         "live shadow started (zero transactions)");
 
@@ -142,10 +200,8 @@ pub async fn run(
             // BAGG-1: seed the persisted 24h/7d aggregates from disk BEFORE the
             // loop starts, so a restart's first page load already reflects
             // history instead of resetting to zero while new decisions trickle in.
-            let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
-            if let Ok(json) = serde_json::to_string(&agg) {
-                handle.set_aggregates(json);
-            }
+            let agg = crate::aggregates::compute(Path::new(&out_dir), Utc::now());
+            handle.set_aggregates(agg);
             Some(handle)
         }
         None => None,
@@ -183,10 +239,17 @@ pub async fn run(
                 // premature incremental-eviction machinery) and keeps `/aggregates`
                 // from drifting stale for long between restarts.
                 if let Some(d) = &dashboard {
-                    let agg = crate::aggregates::compute(Path::new(out_dir), Utc::now());
-                    if let Ok(json) = serde_json::to_string(&agg) {
-                        d.set_aggregates(json);
-                    }
+                    let agg = crate::aggregates::compute(Path::new(&out_dir), Utc::now());
+                    d.set_aggregates(agg);
+                }
+                // Retention: same cadence, cheap directory scan (a handful of
+                // files at this scale) — deletes nothing unless a file has
+                // actually aged out (rule #7: loud only when something happens).
+                let pruned = crate::retention::prune_old_decisions(
+                    Path::new(&out_dir), Utc::now().date_naive(), retention_days,
+                );
+                if !pruned.is_empty() {
+                    info!(count = pruned.len(), retention_days, "retention: pruned old decisions files");
                 }
             }
             maybe = rx.recv() => match maybe {
@@ -223,10 +286,10 @@ pub async fn run(
     match sink {
         Some(mut s) => {
             s.flush_silent().await?;
-            info!(source = source.name(), decisions = total, out = %path.display(),
+            info!(sources = %source_label, decisions = total, out = %path.display(),
                 "live shadow done");
         }
-        None => info!(source = source.name(), "live shadow done — no intents observed"),
+        None => info!(sources = %source_label, "live shadow done — no intents observed"),
     }
     Ok(())
 }

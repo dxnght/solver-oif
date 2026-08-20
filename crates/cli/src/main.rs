@@ -10,6 +10,7 @@ mod aggregates;
 mod dashboard;
 mod doctor;
 mod live;
+mod retention;
 
 use std::path::PathBuf;
 
@@ -22,7 +23,6 @@ use solver_types::ChainId;
 /// Default on-disk locations per source.
 const UNISWAPX_DATA_DIR: &str = "data/uniswapx";
 const ACROSS_DATA_DIR: &str = "data/across";
-const DATA_DIR: &str = "data";
 
 #[derive(Parser)]
 #[command(name = "solver", version, about = "Cross-chain intent engine (ERC-7683 / OIF) — research tooling")]
@@ -46,6 +46,12 @@ enum Command {
         /// Output directory for the report.
         #[arg(long, default_value = "reports/run")]
         out_dir: String,
+        /// Input directory to scan (recursively) for `*.jsonl`. Default is
+        /// all of `data/` (every ingested source); narrow this to reproduce
+        /// a report generated when the source mix on disk was different,
+        /// e.g. `data/uniswapx` alone.
+        #[arg(long, default_value = "data")]
+        data_dir: String,
         /// Price the long-tail via live CoinGecko (by contract address) instead
         /// of the static feed. Default off (deterministic CI).
         #[arg(long)]
@@ -59,21 +65,40 @@ enum Command {
         #[arg(long)]
         reproducible: bool,
     },
-    /// Phase-1 live shadow: subscribe to real-time intents and log shadow
-    /// decisions. Zero transactions. Needs `ACROSS_WS_<CHAIN>` per chain.
+    /// Phase-1 live shadow: poll real-time-ish intents and log shadow
+    /// decisions. Zero transactions. Needs `ACROSS_RPC_<CHAIN>` per chain,
+    /// depending on `--sources` (POLL-1: checkpointed `eth_getLogs`, replacing
+    /// the earlier WS `eth_subscribe` push — see `solver_ingest::live::poll`
+    /// docs for why: push volume is driven by chain activity we don't
+    /// control, poll gives a fixed request ceiling we do).
     Live {
         /// Comma-separated origin chains, e.g. `base,arbitrum,optimism`.
         #[arg(long)]
         chains: String,
-        /// Comma-separated sources. Only `across` is wired; `oif` stays idle.
+        /// Comma-separated sources: `across` and/or `oif` (OIF-2) — both need
+        /// `ACROSS_RPC_<CHAIN>` (chain-generic, shared with the gas ladder).
+        /// A source with nothing configured is idle, not an error.
         #[arg(long, default_value = "across")]
         sources: String,
         /// Stop after N seconds (omit to run until interrupted).
         #[arg(long)]
         duration: Option<u64>,
-        /// Output directory for the decisions JSONL.
+        /// Output directory for the decisions JSONL and per-chain poll
+        /// checkpoints.
         #[arg(long, default_value = live::LIVE_OUT_DIR)]
         out: String,
+        /// How often (seconds) each chain is polled for new logs. Lower = less
+        /// latency, more RPC requests; higher = the reverse. The request
+        /// ceiling per chain is exactly `2 × 86400/interval` per day
+        /// (`eth_blockNumber` + `eth_getLogs`), regardless of chain activity.
+        #[arg(long, default_value_t = solver_ingest::live::poll::DEFAULT_POLL_INTERVAL.as_secs())]
+        poll_interval_secs: u64,
+        /// Delete decisions-*.jsonl older than N calendar days (checked every
+        /// heartbeat). Keeps a 24/7 service's disk use bounded. 0 = keep
+        /// forever. Below 8 truncates the dashboard's 7d window (a loud
+        /// startup WARN, not silence) — see `retention` module docs.
+        #[arg(long, default_value_t = retention::DEFAULT_RETENTION_DAYS)]
+        retention_days: i64,
         /// Serve a live observability dashboard on `127.0.0.1:<port>` (SSE of
         /// the same shadow decisions). Omit to keep the plain B4 behavior.
         #[arg(long)]
@@ -149,18 +174,20 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Ingest { source, days } => run_ingest(&source, days).await,
-        Command::Backtest { out_dir, live_prices, live_gas, reproducible } => {
+        Command::Backtest { out_dir, data_dir, live_prices, live_gas, reproducible } => {
             // Backtest defaults to static gas (deterministic CI); --live-gas
             // opts into the ladder, --reproducible forces static.
             let (prices, gas) =
                 build_pricing(live_prices && !reproducible, live_gas && !reproducible);
-            run_backtest(&out_dir, prices, gas).await
+            run_backtest(&data_dir, &out_dir, prices, gas).await
         }
         Command::Live {
             chains,
             sources,
             duration,
             out,
+            poll_interval_secs,
+            retention_days,
             dashboard_port,
             live_prices,
             static_gas,
@@ -177,7 +204,16 @@ async fn main() -> anyhow::Result<()> {
             // --reproducible forces static.
             let (prices, gas) =
                 build_pricing(live_prices && !reproducible, !static_gas && !reproducible);
-            live::run(chains, sources, duration, &out, dashboard_port, prices, gas).await
+            let config = live::LiveConfig {
+                chains,
+                sources,
+                duration,
+                out_dir: out,
+                poll_interval: std::time::Duration::from_secs(poll_interval_secs),
+                retention_days,
+                dashboard_port,
+            };
+            live::run(config, prices, gas).await
         }
         Command::Doctor { suggest } => {
             run_doctor(suggest).await;
@@ -232,8 +268,11 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
             Ok(())
         }
         "oif" => anyhow::bail!(
-            "source 'oif': IDLE — settler address UNVERIFIED, must be confirmed on-chain \
-             first (see PROJECT-STATUS). Not ingesting."
+            "source 'oif': no historical ingest yet — 'ingest' scans backfill data, and OIF-2 \
+             only built the live poll adapter (`solver live --sources oif`), which streams new \
+             orders forward from the chain tip, not a historical backfill over a date range. \
+             The InputSettlerEscrow address itself is verified (OIF-1); this is a missing \
+             feature, not an unverified address."
         ),
         other => anyhow::bail!(
             "unknown source '{other}'. Known sources: 'uniswapx' (no key), \
@@ -242,10 +281,10 @@ async fn run_ingest(source: &str, days: u32) -> anyhow::Result<()> {
     }
 }
 
-async fn run_backtest(out_dir: &str, prices: PriceSource, gas: GasSource) -> anyhow::Result<()> {
+async fn run_backtest(data_dir: &str, out_dir: &str, prices: PriceSource, gas: GasSource) -> anyhow::Result<()> {
     let (prices_label, gas_label) = (prices.label(), gas.label());
     let summary =
-        solver_backtest::run(std::path::Path::new(DATA_DIR), std::path::Path::new(out_dir), &prices, gas)
+        solver_backtest::run(std::path::Path::new(data_dir), std::path::Path::new(out_dir), &prices, gas)
             .await?;
     let m = &summary.metrics;
     println!(
