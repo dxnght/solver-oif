@@ -17,7 +17,7 @@
 //! show. Prices/gas are static here (live feeds are a later bucket) — same as
 //! the backtest, so the decision is comparable.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
 use anyhow::Result;
@@ -184,9 +184,7 @@ pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Res
     }
     let source_label = open_names.join("+");
 
-    let path = Path::new(&out_dir)
-        .join(format!("decisions-{source_label}-{}.jsonl", Utc::now().format("%Y%m%d")));
-    info!(sources = %source_label, out = %path.display(), duration_s = ?duration,
+    info!(sources = %source_label, out_dir = %out_dir, duration_s = ?duration,
         prices = prices.label(), gas = gas.label(),
         "live shadow started (zero transactions)");
 
@@ -211,7 +209,17 @@ pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Res
     let policy = FillPolicy::default();
 
     // Lazy sink — no confusing 0-byte file if the window is quiet (rule #7).
+    // `sink_day` is the UTC day (`%Y%m%d`) the open sink's file is stamped
+    // with; reopened onto a fresh path whenever the day advances (LIV-ROLL).
+    // A sink opened once and reused for the process's whole lifetime would
+    // keep writing under its FIRST day's filename forever — `retention.rs`
+    // deletes by the day parsed FROM the filename, so a long-running process
+    // (this is a 24/7 systemd service) would eventually have its own
+    // still-open, actively-written file pruned out from under it once that
+    // stale name aged past the retention window (rule #7: this was silent).
     let mut sink: Option<JsonlSink> = None;
+    let mut sink_day: Option<String> = None;
+    let mut sink_path: Option<PathBuf> = None;
     let mut total = 0usize;
     let mut last_heartbeat = 0usize;
 
@@ -271,8 +279,19 @@ pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Res
                     if let Some(d) = &dashboard {
                         d.publish(&record);
                     }
-                    if sink.is_none() {
-                        sink = Some(JsonlSink::open(&path).await?);
+                    // Roll to a fresh file the instant the UTC day advances —
+                    // see the `sink_day` doc comment above for why a sink
+                    // opened once and reused forever is unsafe here.
+                    let today = as_of.format("%Y%m%d").to_string();
+                    if sink_day.as_deref() != Some(today.as_str()) {
+                        if let Some(mut old) = sink.take() {
+                            old.flush_silent().await?;
+                        }
+                        let new_path = decisions_path(&out_dir, &source_label, &today);
+                        info!(out = %new_path.display(), "live: opening decisions file for new day");
+                        sink = Some(JsonlSink::open(&new_path).await?);
+                        sink_path = Some(new_path);
+                        sink_day = Some(today);
                     }
                     let s = sink.as_mut().expect("sink opened");
                     s.write(&record).await?;
@@ -286,12 +305,21 @@ pub async fn run(config: LiveConfig, prices: PriceSource, gas: GasSource) -> Res
     match sink {
         Some(mut s) => {
             s.flush_silent().await?;
-            info!(sources = %source_label, decisions = total, out = %path.display(),
-                "live shadow done");
+            let out = sink_path.map(|p| p.display().to_string()).unwrap_or_default();
+            info!(sources = %source_label, decisions = total, out = %out, "live shadow done");
         }
         None => info!(sources = %source_label, "live shadow done — no intents observed"),
     }
     Ok(())
+}
+
+/// The day-stamped decisions file path for `source_label` under `out_dir`,
+/// e.g. `("reports/live", "across", "20260821")` →
+/// `reports/live/decisions-across-20260821.jsonl`. A free function so the
+/// rotation this is built for (a new day → a new path) is unit-testable
+/// without a live sink or the wall clock.
+fn decisions_path(out_dir: &str, source_label: &str, day: &str) -> PathBuf {
+    Path::new(out_dir).join(format!("decisions-{source_label}-{day}.jsonl"))
 }
 
 #[cfg(test)]
@@ -307,6 +335,24 @@ mod tests {
     const ARB_USDC: Address = address!("af88d065e77c8cC2239327C5EDb3A432268e5831");
     // 64-hex tx, set on the ORIGIN chain (deposit) like a live Across intent.
     const TX: &str = "0xabc0000000000000000000000000000000000000000000000000000000000001";
+
+    /// `decisions_path` shape: `<out_dir>/decisions-<source_label>-<day>.jsonl`.
+    #[test]
+    fn decisions_path_is_day_stamped() {
+        let p = decisions_path("reports/live", "across", "20260821");
+        assert_eq!(p, Path::new("reports/live/decisions-across-20260821.jsonl"));
+    }
+
+    /// LIV-ROLL regression: two different days must produce two different
+    /// paths for the same source — this is exactly the rotation the live
+    /// loop's `sink_day != today` check relies on to reopen onto a new file
+    /// instead of writing forever under the day it started on.
+    #[test]
+    fn decisions_path_differs_across_days() {
+        let a = decisions_path("reports/live", "across", "20260820");
+        let b = decisions_path("reports/live", "across", "20260821");
+        assert_ne!(a, b, "a day rollover must produce a different decisions-file path");
+    }
 
     /// A stable Base→Arbitrum intent (origin tx_ref), the shape a live Across
     /// deposit takes once normalized. `out_units < in_units` → fillable.
